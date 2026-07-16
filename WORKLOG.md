@@ -1,5 +1,12 @@
 # SyncPlay worklog
 
+## 2026-07-16 (evening) — first real multi-device sync
+
+Beep test passed across PC + phone on Wi-Fi (network "Public" profile;
+firewall pre-checked — Python314 already had inbound Allow rules). Matthew
+verdict: "awesome". v1's core promise — multiple physical devices sounding
+as one — is confirmed on real hardware over a real network.
+
 ## 2026-07-16 — v1 built and verified end-to-end (single machine)
 
 Plan approved (see `~/.claude/plans/uh-i-m-dreaming-of-stateful-charm.md`).
