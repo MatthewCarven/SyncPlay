@@ -7,6 +7,15 @@ firewall pre-checked — Python314 already had inbound Allow rules). Matthew
 verdict: "awesome". v1's core promise — multiple physical devices sounding
 as one — is confirmed on real hardware over a real network.
 
+First real-hardware sync numbers (3 nodes):
+- Phone (Wi-Fi): drift 6.7–6.8 ppm, best RTT 2.8 ms, 163/1176 samples
+  surviving the min-RTT filter — jitter filtering working exactly as
+  designed. 6.8 ppm ≈ 1.6 ms drift per 4-min song → between-song resync
+  comfortably covers multi-room; rate correction only needed for 30 min+
+  continuous tracks (v2).
+- Laptop: drift −0.1 ppm, best RTT 0.3 ms, ~all samples used.
+- Same-machine browser node: −0.0 ppm (control baseline, as expected).
+
 ## 2026-07-16 — v1 built and verified end-to-end (single machine)
 
 Plan approved (see `~/.claude/plans/uh-i-m-dreaming-of-stateful-charm.md`).
