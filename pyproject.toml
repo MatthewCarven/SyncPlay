@@ -1,0 +1,9 @@
+[project]
+name = "syncplay"
+version = "0.1.0"
+description = "Multi-node synchronized network file player — Python conductor, browser nodes"
+requires-python = ">=3.11"
+dependencies = ["aiohttp>=3.9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

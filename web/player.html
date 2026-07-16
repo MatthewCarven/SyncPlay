@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>SyncPlay Node</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --edge: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #3fb950; --warn: #d29922;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  .card {
+    width: 100%; max-width: 420px; background: var(--card);
+    border: 1px solid var(--edge); border-radius: 14px; padding: 22px;
+  }
+  h1 { font-size: 1.05rem; letter-spacing: .12em; color: var(--dim); margin-bottom: 18px; }
+  h1 b { color: var(--text); }
+  #joinView input {
+    width: 100%; padding: 12px; font: inherit; color: var(--text);
+    background: var(--bg); border: 1px solid var(--edge); border-radius: 8px;
+    margin-bottom: 14px; text-align: center;
+  }
+  #joinBtn {
+    width: 100%; padding: 18px; font: inherit; font-size: 1.3rem; font-weight: 700;
+    letter-spacing: .2em; color: #04120a; background: var(--accent);
+    border: 0; border-radius: 10px; cursor: pointer;
+  }
+  #joinBtn:active { transform: scale(.985); }
+  .hint { color: var(--dim); font-size: .72rem; margin-top: 12px; line-height: 1.5; }
+  #liveView { display: none; }
+  .status { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--warn); }
+  .dot.ok { background: var(--accent); }
+  #nowPlaying {
+    min-height: 3.2em; padding: 12px; background: var(--bg); border-radius: 8px;
+    border: 1px solid var(--edge); margin-bottom: 16px; font-size: .9rem;
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    color: var(--dim);
+  }
+  #nowPlaying.active { color: var(--text); border-color: var(--accent); }
+  .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+  .stat { background: var(--bg); border: 1px solid var(--edge); border-radius: 8px; padding: 10px 6px; text-align: center; }
+  .stat .v { font-size: 1.05rem; font-weight: 700; }
+  .stat .k { font-size: .62rem; color: var(--dim); letter-spacing: .08em; margin-top: 3px; }
+  label.vol { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: .75rem; }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>SYNC<b>PLAY</b> · node</h1>
+
+    <div id="joinView">
+      <input id="nameInput" maxlength="24" placeholder="name this device">
+      <button id="joinBtn">JOIN</button>
+      <div class="hint">
+        Joining unlocks audio and keeps the screen awake.
+        Turn OFF silent mode on iPhones. Volume up. That's it.
+      </div>
+    </div>
+
+    <div id="liveView">
+      <div class="status"><div class="dot" id="dot"></div><span id="statusText">connecting…</span></div>
+      <div id="nowPlaying">nothing playing</div>
+      <div class="stats">
+        <div class="stat"><div class="v" id="stOffset">—</div><div class="k">OFFSET ms</div></div>
+        <div class="stat"><div class="v" id="stRtt">—</div><div class="k">BEST RTT ms</div></div>
+        <div class="stat"><div class="v" id="stSkew">—</div><div class="k">DRIFT ppm</div></div>
+      </div>
+      <label class="vol">vol <input type="range" id="vol" min="0" max="100" value="80"></label>
+    </div>
+  </div>
+  <script src="/static/player.js"></script>
+</body>
+</html>

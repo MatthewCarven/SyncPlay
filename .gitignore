@@ -1,0 +1,8 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+venv/
+syncplay_state.json
+# your music stays yours — test tones regenerate via tools/make_test_tones.py
+music/

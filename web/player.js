@@ -1,0 +1,258 @@
+/* SyncPlay player node.
+ *
+ * Deliberately dumb: echo timestamp pings, prefetch + decode tracks, and
+ * start playback at the node-local millisecond the conductor commands.
+ * All clock estimation happens server-side; the only clever bit here is
+ * mapping performance.now() time onto the AudioContext timeline.
+ */
+"use strict";
+
+// --- identity ---------------------------------------------------------------
+const clientId = (() => {
+  let id = localStorage.getItem("syncplay.clientId");
+  if (!id) {
+    id = (crypto.randomUUID && crypto.randomUUID()) ||
+         ("id-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+    localStorage.setItem("syncplay.clientId", id);
+  }
+  return id;
+})();
+
+const $ = (id) => document.getElementById(id);
+$("nameInput").value = localStorage.getItem("syncplay.name") || "";
+
+// --- state ------------------------------------------------------------------
+let ctx = null;          // AudioContext, created on the join gesture
+let master = null;       // master GainNode
+let ws = null;
+let joined = false;
+let nudgeMs = 0;
+let reconnectDelay = 1000;
+let wakeLock = null;
+
+const cache = new Map(); // trackId -> AudioBuffer (capped at 2)
+const loading = new Set();
+let current = null;      // {src, trackId}
+
+// --- clock mapping: performance.now() ms -> AudioContext seconds -------------
+// getOutputTimestamp() returns a correlated pair: "context position X was/will
+// be at the speaker at performance time Y" — so scheduling through it bakes in
+// the device's output latency. Fallback: currentTime minus reported latency.
+function perfToCtx(perfMs) {
+  if (ctx.getOutputTimestamp) {
+    const ts = ctx.getOutputTimestamp();
+    if (ts && ts.contextTime > 0 && ts.performanceTime > 0) {
+      return ts.contextTime + (perfMs - ts.performanceTime) / 1000;
+    }
+  }
+  const latency = ctx.outputLatency || ctx.baseLatency || 0;
+  return ctx.currentTime + (perfMs - performance.now()) / 1000 - latency;
+}
+
+// --- join -------------------------------------------------------------------
+$("joinBtn").addEventListener("click", async () => {
+  const name = $("nameInput").value.trim() || "node-" + clientId.slice(0, 4);
+  localStorage.setItem("syncplay.name", name);
+
+  ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" });
+  await ctx.resume(); // inside the gesture: unlocks audio on iOS/Android
+  master = ctx.createGain();
+  master.gain.value = $("vol").value / 100;
+  master.connect(ctx.destination);
+
+  joined = true;
+  $("joinView").style.display = "none";
+  $("liveView").style.display = "block";
+  requestWakeLock();
+  connect();
+});
+
+$("vol").addEventListener("input", () => {
+  if (master) master.gain.value = $("vol").value / 100;
+});
+
+async function requestWakeLock() {
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch (_) {}
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && joined) {
+    requestWakeLock();
+    if (ctx && ctx.state !== "running") ctx.resume();
+  }
+});
+
+// --- websocket --------------------------------------------------------------
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws/player`);
+
+  ws.onopen = () => {
+    reconnectDelay = 1000;
+    setStatus(true, "syncing…");
+    ws.send(JSON.stringify({
+      type: "hello", clientId,
+      name: localStorage.getItem("syncplay.name"),
+      ua: navigator.userAgent.slice(0, 110),
+    }));
+  };
+
+  ws.onmessage = (ev) => {
+    const c1 = performance.now(); // stamp receipt BEFORE parsing
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    handle(msg, c1);
+  };
+
+  ws.onclose = () => {
+    setStatus(false, `reconnecting in ${Math.round(reconnectDelay / 1000)}s…`);
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 8000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+function handle(msg, c1) {
+  switch (msg.type) {
+    case "ping":
+      send({ type: "pong", id: msg.id, t0: msg.t0, c1, c2: performance.now() });
+      break;
+    case "welcome":
+      nudgeMs = msg.nudgeMs || 0;
+      setStatus(true, `joined as “${msg.name}”`);
+      // A reconnect without a page reload keeps our decoded buffers, but the
+      // server forgot about them — re-announce so catchup can be instant.
+      for (const [trackId, buf] of cache)
+        send({ type: "loaded", trackId, durationMs: buf.duration * 1000 });
+      break;
+    case "config":
+      nudgeMs = msg.nudgeMs || 0;
+      break;
+    case "preload":
+      loadTrack(msg.trackId, msg.url);
+      break;
+    case "play":
+      onPlay(msg);
+      break;
+    case "stop":
+      onStop(msg);
+      break;
+    case "beep":
+      onBeep(msg);
+      break;
+    case "stats":
+      $("stOffset").textContent = msg.offsetMs.toFixed(2);
+      $("stRtt").textContent = msg.rttMs.toFixed(1);
+      $("stSkew").textContent = msg.skewPpm.toFixed(1);
+      break;
+  }
+}
+
+// --- track loading ------------------------------------------------------------
+async function loadTrack(trackId, url) {
+  if (cache.has(trackId) || loading.has(trackId)) return cache.get(trackId);
+  loading.add(trackId);
+  try {
+    const resp = await fetch(url || `/tracks/${trackId}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const buf = await ctx.decodeAudioData(await resp.arrayBuffer());
+    cache.set(trackId, buf);
+    // Decoded PCM is big (~85 MB per 4-min track): keep current + next only.
+    for (const key of cache.keys()) {
+      if (cache.size <= 2) break;
+      if (key !== trackId && key !== (current && current.trackId)) cache.delete(key);
+    }
+    send({ type: "loaded", trackId, durationMs: buf.duration * 1000 });
+    return buf;
+  } catch (err) {
+    send({ type: "loadError", trackId, error: String(err).slice(0, 120) });
+    return null;
+  } finally {
+    loading.delete(trackId);
+  }
+}
+
+// --- playback -------------------------------------------------------------------
+async function onPlay(msg) {
+  if (ctx.state !== "running") await ctx.resume();
+  let buf = cache.get(msg.trackId);
+  if (!buf) buf = await loadTrack(msg.trackId, null); // late: decode, then catch up
+  if (!buf) return;
+  startBuffer(buf, msg);
+}
+
+function startBuffer(buf, msg) {
+  stopCurrent(null);
+  let when = perfToCtx(msg.atNodeMs + nudgeMs);
+  let seekS = (msg.seekMs || 0) / 1000;
+  const nowCtx = ctx.currentTime;
+  if (when < nowCtx + 0.02) { // target already passed → join at the right spot
+    seekS += (nowCtx + 0.06) - when;
+    when = nowCtx + 0.06;
+  }
+  if (seekS >= buf.duration) return;
+
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(master);
+  src.start(when, seekS);
+  current = { src, trackId: msg.trackId };
+  src.onended = () => {
+    if (current && current.src === src) {
+      current = null;
+      setNowPlaying(null);
+      send({ type: "state", playing: null });
+    }
+  };
+  setNowPlaying(msg.title || msg.trackId);
+  send({ type: "state", playing: msg.trackId });
+}
+
+function onStop(msg) {
+  if (!current) return;
+  if (msg && typeof msg.atNodeMs === "number") {
+    const when = Math.max(perfToCtx(msg.atNodeMs + nudgeMs), ctx.currentTime);
+    try { current.src.stop(when); } catch (_) {}
+  } else {
+    stopCurrent(null);
+    setNowPlaying(null);
+    send({ type: "state", playing: null });
+  }
+}
+
+function stopCurrent() {
+  if (current) {
+    const src = current.src;
+    current = null; // clear first so onended doesn't double-report
+    try { src.onended = null; src.stop(); } catch (_) {}
+  }
+}
+
+function onBeep(msg) {
+  const when = Math.max(perfToCtx(msg.atNodeMs + nudgeMs), ctx.currentTime);
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.frequency.value = 880;
+  g.gain.setValueAtTime(0, when);
+  g.gain.linearRampToValueAtTime(0.6, when + 0.005);
+  g.gain.setValueAtTime(0.6, when + 0.1);
+  g.gain.linearRampToValueAtTime(0, when + 0.13);
+  osc.connect(g).connect(master);
+  osc.start(when);
+  osc.stop(when + 0.15);
+}
+
+// --- ui ----------------------------------------------------------------------
+function setStatus(ok, text) {
+  $("dot").className = "dot" + (ok ? " ok" : "");
+  $("statusText").textContent = text;
+}
+
+function setNowPlaying(title) {
+  const el = $("nowPlaying");
+  el.textContent = title ? `♪ ${title}` : "nothing playing";
+  el.className = title ? "active" : "";
+}

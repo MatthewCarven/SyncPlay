@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "syncplay",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "syncplay", "--music-dir", "music", "--verbose"],
+      "port": 8927
+    }
+  ]
+}

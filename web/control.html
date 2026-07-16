@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SyncPlay Control</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --edge: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #3fb950; --warn: #d29922; --bad: #f85149;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text); min-height: 100vh; padding: 20px;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 13px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 1rem; letter-spacing: .12em; color: var(--dim); margin-bottom: 14px; }
+  h1 b { color: var(--text); }
+  h2 { font-size: .72rem; letter-spacing: .14em; color: var(--dim); margin: 18px 0 8px; }
+  .card { background: var(--card); border: 1px solid var(--edge); border-radius: 12px; padding: 14px; }
+  /* transport */
+  #transport { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button {
+    font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--edge); border-radius: 8px; padding: 8px 14px; cursor: pointer;
+  }
+  button:hover { border-color: var(--dim); }
+  button.primary { background: var(--accent); color: #04120a; font-weight: 700; border: 0; }
+  #nowLine { flex: 1 1 100%; color: var(--dim); padding-top: 6px; }
+  #nowLine b { color: var(--text); }
+  #posBar { height: 4px; background: var(--edge); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+  #posFill { height: 100%; width: 0; background: var(--accent); transition: width .3s linear; }
+  /* tables */
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--edge); white-space: nowrap; }
+  th { color: var(--dim); font-weight: 400; font-size: .68rem; letter-spacing: .1em; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  th.num { text-align: right; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 6px; }
+  .dot.ok { background: var(--accent); }
+  .pill { font-size: .68rem; color: var(--dim); }
+  input.nudge {
+    width: 64px; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--edge); border-radius: 6px; padding: 4px 6px; text-align: right;
+  }
+  tr.trackRow { cursor: default; }
+  .playBtn { padding: 3px 10px; }
+  #toast {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: var(--card); border: 1px solid var(--warn); color: var(--text);
+    padding: 10px 16px; border-radius: 10px; opacity: 0; transition: opacity .25s;
+    pointer-events: none; max-width: 90vw;
+  }
+  #toast.show { opacity: 1; }
+  .empty { color: var(--dim); padding: 10px 4px; }
+  @media (max-width: 640px) { th, td { padding: 6px 4px; } .hideSm { display: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SYNC<b>PLAY</b> · control <span id="connState" class="pill">connecting…</span></h1>
+
+  <div class="card" id="transport">
+    <button class="primary" id="btnPlay">▶ play</button>
+    <button id="btnPause">⏸ pause</button>
+    <button id="btnResume">⏵ resume</button>
+    <button id="btnNext">⏭ next</button>
+    <button id="btnStop">■ stop</button>
+    <button id="btnBeep" title="every node beeps at the same instant — the sync smoke test">🔔 beep test</button>
+    <button id="btnResync" title="dense ping burst on all nodes now">⇄ resync</button>
+    <button id="btnRescan" title="rescan the music folder">↻ rescan</button>
+    <div id="nowLine">nothing playing</div>
+    <div id="posBar"><div id="posFill"></div></div>
+  </div>
+
+  <h2>NODES</h2>
+  <div class="card" style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>node</th><th class="num">offset ms</th><th class="num">best rtt</th>
+        <th class="num">drift ppm</th><th class="num hideSm">samples</th>
+        <th class="num">nudge ms</th><th>state</th>
+      </tr></thead>
+      <tbody id="nodeRows"></tbody>
+    </table>
+    <div class="empty" id="nodesEmpty">no nodes yet — open <b id="playerUrl"></b> on each device and tap JOIN</div>
+  </div>
+
+  <h2>PLAYLIST</h2>
+  <div class="card" style="overflow-x:auto">
+    <table><tbody id="trackRows"></tbody></table>
+    <div class="empty" id="tracksEmpty"></div>
+  </div>
+</div>
+<div id="toast"></div>
+<script src="/static/control.js"></script>
+</body>
+</html>

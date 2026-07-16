@@ -1,0 +1,77 @@
+# SyncPlay
+
+Multi-node synchronized network file player. One Python **conductor** owns the
+music library and the reference clock; every speaker device — Windows PC, phone,
+tablet — is a **node** that just opens a web page. No installs on nodes, ever.
+
+The conductor continuously pings every node (NTP-style four-timestamp exchanges
+over WebSocket), filters network jitter by keeping only low-RTT samples,
+estimates each device's clock **offset** and **drift** (consumer crystals
+disagree by 10–100 ppm ≈ 6–24 ms per song), and hands each node a
+drift-projected start time for every track. Heavy resync bursts run in the idle
+gaps between songs, where corrections are inaudible.
+
+## Quick start
+
+```
+pip install aiohttp
+python tools/make_test_tones.py        # optional: generate test audio
+python -m syncplay --music-dir music
+```
+
+Then:
+
+- **Every device** → open `http://<your-LAN-IP>:8927/` → tap **JOIN**
+- **You** → open `http://<your-LAN-IP>:8927/control`
+
+Watch each node's offset/RTT/drift settle in the NODES table (give it ~30 s for
+a drift estimate), hit **🔔 beep test** — you should hear *one* beep, not a
+flam — then play something.
+
+## How the sync works
+
+1. **Measure:** conductor sends `ping{t0}`; node echoes `pong{t0, c1, c2}`
+   stamped with its `performance.now()`; conductor stamps `t3` on receipt.
+   Offset = `((c1−t0)+(c2−t3))/2`, RTT = `(t3−t0)−(c2−c1)`.
+2. **Filter:** only samples within a small tolerance of the window's best RTT
+   count — low-RTT exchanges suffered the least queueing, so their symmetric-
+   delay assumption is the least wrong. This absorbs Wi-Fi spikes.
+3. **Drift:** least-squares slope of filtered offsets over a 10-minute sliding
+   window ([timesync.py](syncplay/timesync.py) — pure stdlib, unit-tested
+   against synthetic skewed clocks in [tests/](tests/test_timesync.py)).
+4. **Schedule:** "play track X at node-local time L", where L projects the
+   offset forward along the drift slope. In the browser, L (a
+   `performance.now()` value) is mapped onto the AudioContext timeline via
+   `getOutputTimestamp()`, which bakes in the device's output latency, and the
+   buffer starts sample-accurately via `source.start(when)`.
+5. **Correct:** sparse pings keep the model fresh during playback; dense bursts
+   run between songs; every track start is a fresh alignment, so error can't
+   accumulate across a playlist.
+
+## Cadence & calibration
+
+- Node joins → 16-ping burst converges its model in ~1 s.
+- During playback → 3 pings / 5 s (a few hundred bytes; inaudible in every sense).
+- Song gap / manual **⇄ resync** → 10-ping bursts.
+- Per-node **nudge** (ms, on the control page) compensates residual speaker/DAC
+  latency: if one device sounds late, give it a negative nudge. Nudges persist
+  in `syncplay_state.json`.
+
+## Notes & limits (v1)
+
+- LAN only. No auth, no TLS — don't expose the port to the internet.
+- Nodes decode whole files in memory (~85 MB per 4-min track); the cache holds
+  the current + next track only. Phones are fine with this.
+- Format support = whatever the node's browser decodes: MP3/AAC/WAV/FLAC work
+  everywhere modern; OGG/Opus not on iOS Safari.
+- A one-shot start is good to roughly ±(RTT jitter + a few ms) per device;
+  drift between song starts is pre-compensated by the slope model. Mid-song
+  rate micro-correction (for hour-long tracks / same-room echo hunting) is the
+  planned v2.
+- iPhones: silent-mode switch must be OFF for Web Audio to sound.
+
+## Verifying sync with your ears and a mic
+
+Play `music/Test Pulse A (440Hz).wav` on two devices in the same room — sharp
+pulse trains make misalignment obvious as echo/flam. For numbers: record both
+devices with a phone mic and measure the transient gap in any waveform editor.
