@@ -44,6 +44,7 @@
     width: 64px; font: inherit; color: var(--text); background: var(--bg);
     border: 1px solid var(--edge); border-radius: 6px; padding: 4px 6px; text-align: right;
   }
+  input.volSlider { width: 72px; accent-color: var(--accent); vertical-align: middle; }
   tr.trackRow { cursor: default; }
   .playBtn { padding: 3px 10px; }
   #toast {
@@ -79,8 +80,9 @@
     <table>
       <thead><tr>
         <th>node</th><th class="num">offset ms</th><th class="num">best rtt</th>
-        <th class="num">drift ppm</th><th class="num hideSm">samples</th>
-        <th class="num">nudge ms</th><th>state</th>
+        <th class="num">drift ppm</th><th class="num" title="live playback position error vs the conductor's ideal timeline">err ms</th>
+        <th class="num hideSm">samples</th>
+        <th class="num">nudge ms</th><th>vol</th><th>state</th>
       </tr></thead>
       <tbody id="nodeRows"></tbody>
     </table>

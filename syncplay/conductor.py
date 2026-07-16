@@ -81,6 +81,7 @@ class Node:
         self.client_id = client_id
         self.name = name
         self.nudge_ms = 0.0
+        self.volume: Optional[int] = None  # None = never set from control
         self.ws: Optional[web.WebSocketResponse] = None
         self.model = ClockModel()
         self.connected = False
@@ -89,6 +90,8 @@ class Node:
         self.pending: Dict[int, float] = {}  # ping id -> t0
         self.loaded: Set[str] = set()  # track ids decoded and ready this page-life
         self.playing_track: Optional[str] = None  # as reported by the node
+        self.sync_err_ms: Optional[float] = None  # last steer error it reported
+        self.play_rate: Optional[float] = None  # its current servo playback rate
         self.burst_until = 0.0
         self.kick = asyncio.Event()
         self.ping_task: Optional[asyncio.Task] = None
@@ -101,6 +104,8 @@ class Node:
         self.pending.clear()
         self.loaded.clear()
         self.playing_track = None
+        self.sync_err_ms = None
+        self.play_rate = None
         self.burst_until = 0.0
 
     def end_session(self) -> None:
@@ -126,6 +131,9 @@ class Node:
             "connected": self.connected,
             "ua": self.ua,
             "nudgeMs": self.nudge_ms,
+            "volume": self.volume,
+            "syncErrMs": self.sync_err_ms,
+            "ratePpm": (self.play_rate - 1.0) * 1e6 if self.play_rate else None,
             "playing": self.playing_track,
             "loadedCurrent": bool(current_track and current_track in self.loaded),
             "offsetMs": None,
@@ -160,7 +168,7 @@ class Conductor:
         self._advance_task: Optional[asyncio.Task] = None
         self._transport_task: Optional[asyncio.Task] = None
         self._pulse_task: Optional[asyncio.Task] = None
-        self._nudges: Dict[str, float] = self._load_state()
+        self._state: dict = self._load_state()
         self.scan_tracks()
 
     # --- library ------------------------------------------------------------
@@ -192,18 +200,26 @@ class Conductor:
 
     # --- nudge persistence ----------------------------------------------------
 
-    def _load_state(self) -> Dict[str, float]:
+    def _load_state(self) -> dict:
         try:
             data = json.loads(STATE_FILE.read_text("utf-8"))
-            return {str(k): float(v) for k, v in data.get("nudges", {}).items()}
-        except (OSError, ValueError):
-            return {}
+            return {
+                "nudges": {str(k): float(v) for k, v in data.get("nudges", {}).items()},
+                "volumes": {str(k): int(v) for k, v in data.get("volumes", {}).items()},
+            }
+        except (OSError, ValueError, TypeError):
+            return {"nudges": {}, "volumes": {}}
 
     def _save_state(self) -> None:
         try:
-            nudges = {n.client_id: n.nudge_ms for n in self.nodes.values() if n.nudge_ms}
-            nudges.update({k: v for k, v in self._nudges.items() if k not in self.nodes})
-            STATE_FILE.write_text(json.dumps({"nudges": nudges}, indent=1), "utf-8")
+            for n in self.nodes.values():
+                if n.nudge_ms:
+                    self._state["nudges"][n.client_id] = n.nudge_ms
+                else:
+                    self._state["nudges"].pop(n.client_id, None)
+                if n.volume is not None:
+                    self._state["volumes"][n.client_id] = n.volume
+            STATE_FILE.write_text(json.dumps(self._state, indent=1), "utf-8")
         except OSError as e:
             log.warning("could not persist state: %s", e)
 
@@ -230,7 +246,6 @@ class Conductor:
             tick += 1
             await self.push_state()
             if tick % 2 == 0:
-                current = self.playing.track.id if self.playing else None
                 for node in self.nodes.values():
                     if node.connected:
                         est = node.model.estimate()
@@ -243,6 +258,7 @@ class Conductor:
                                     "skewPpm": est.skew_ppm,
                                 }
                             )
+                await self._steer_all()
 
     # --- state pushes -----------------------------------------------------------
 
@@ -499,6 +515,34 @@ class Conductor:
                     n += 1
         await self.toast(f"Beep scheduled on {n} node(s) - listen for one single beep.")
 
+    async def _steer_all(self) -> None:
+        """v2 servo reference: 'at your local time L the song should be at P'.
+
+        Nodes trim playbackRate by a few hundred ppm against this, which
+        corrects DAC-crystal drift that clock sync alone can't see (the sound
+        card renders 44100 'Hz' on its own oscillator, not the CPU's).
+        """
+        p = self.playing
+        if p is None:
+            return
+        t_ref = now() + 0.3
+        pos_ms = p.position_ms(t_ref)
+        end_ms = p.track.duration_ms
+        if pos_ms < 0 or (end_ms is not None and pos_ms > end_ms - 400.0):
+            return  # still in the lead-in, or too near the end to bother
+        for node in self.nodes.values():
+            if node.connected and node.playing_track == p.track.id:
+                est = node.model.estimate()
+                if est is not None:
+                    await node.send(
+                        {
+                            "type": "steer",
+                            "trackId": p.track.id,
+                            "posMs": pos_ms,
+                            "atNodeMs": est.to_node_time(t_ref) * 1000.0,
+                        }
+                    )
+
     def _preload_msg(self, track: Track) -> dict:
         return {
             "type": "preload",
@@ -539,7 +583,8 @@ class Conductor:
         node = self.nodes.get(client_id)
         if node is None:
             node = Node(client_id, name)
-            node.nudge_ms = self._nudges.get(client_id, 0.0)
+            node.nudge_ms = self._state["nudges"].get(client_id, 0.0)
+            node.volume = self._state["volumes"].get(client_id)
             self.nodes[client_id] = node
         else:
             node.name = name
@@ -551,7 +596,7 @@ class Conductor:
 
         await node.send(
             {"type": "welcome", "nodeId": node.client_id, "name": node.name,
-             "nudgeMs": node.nudge_ms}
+             "nudgeMs": node.nudge_ms, "volume": node.volume}
         )
         node.ping_task = asyncio.create_task(self._ping_loop(node))
 
@@ -610,8 +655,17 @@ class Conductor:
             await self.toast(
                 f"{node.name} failed to decode {data.get('trackId')}: {data.get('error')}"
             )
+        elif kind == "steerAck":
+            try:
+                node.sync_err_ms = float(data["errMs"])
+                node.play_rate = float(data["rate"])
+            except (KeyError, ValueError, TypeError):
+                pass
         elif kind == "state":
             node.playing_track = data.get("playing")
+            if node.playing_track is None:
+                node.sync_err_ms = None
+                node.play_rate = None
 
     async def handle_control_ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20.0)
@@ -666,7 +720,19 @@ class Conductor:
                 except ValueError:
                     return
                 self._save_state()
-                await node.send({"type": "config", "nudgeMs": node.nudge_ms})
+                await node.send({"type": "config", "nudgeMs": node.nudge_ms,
+                                 "volume": node.volume})
+                await self.push_state()
+        elif cmd == "volume":
+            node = self.nodes.get(str(data.get("nodeId")))
+            if node is not None:
+                try:
+                    node.volume = max(0, min(100, int(float(data.get("volume", 80)))))
+                except (ValueError, TypeError):
+                    return
+                self._save_state()
+                await node.send({"type": "config", "nudgeMs": node.nudge_ms,
+                                 "volume": node.volume})
                 await self.push_state()
         elif cmd == "rescan":
             n = self.scan_tracks()

@@ -32,7 +32,12 @@ let wakeLock = null;
 
 const cache = new Map(); // trackId -> AudioBuffer (capped at 2)
 const loading = new Set();
-let current = null;      // {src, trackId}
+let current = null;      // {src, trackId, title, rate, anchorCtx, anchorPos, startedCtx}
+
+// --- v2 servo tuning ---------------------------------------------------------
+const STEER_HORIZON_S = 15;  // aim to null the position error over ~this long
+const MAX_RATE_TRIM = 8e-4;  // ±800 ppm ≈ 1.4 cents of pitch — inaudible
+const REANCHOR_S = 0.2;      // beyond this, slewing is hopeless: restart in place
 
 // --- clock mapping: performance.now() ms -> AudioContext seconds -------------
 // getOutputTimestamp() returns a correlated pair: "context position X was/will
@@ -70,6 +75,11 @@ $("joinBtn").addEventListener("click", async () => {
 $("vol").addEventListener("input", () => {
   if (master) master.gain.value = $("vol").value / 100;
 });
+
+function applyVolume(v) { // pushed from the control page
+  $("vol").value = v;
+  if (master) master.gain.value = v / 100;
+}
 
 async function requestWakeLock() {
   try { wakeLock = await navigator.wakeLock.request("screen"); } catch (_) {}
@@ -122,6 +132,7 @@ function handle(msg, c1) {
       break;
     case "welcome":
       nudgeMs = msg.nudgeMs || 0;
+      if (typeof msg.volume === "number") applyVolume(msg.volume);
       setStatus(true, `joined as “${msg.name}”`);
       // A reconnect without a page reload keeps our decoded buffers, but the
       // server forgot about them — re-announce so catchup can be instant.
@@ -130,6 +141,10 @@ function handle(msg, c1) {
       break;
     case "config":
       nudgeMs = msg.nudgeMs || 0;
+      if (typeof msg.volume === "number") applyVolume(msg.volume);
+      break;
+    case "steer":
+      onSteer(msg);
       break;
     case "preload":
       loadTrack(msg.trackId, msg.url);
@@ -184,22 +199,23 @@ async function onPlay(msg) {
   startBuffer(buf, msg);
 }
 
-function startBuffer(buf, msg) {
-  stopCurrent(null);
-  let when = perfToCtx(msg.atNodeMs + nudgeMs);
-  let seekS = (msg.seekMs || 0) / 1000;
-  const nowCtx = ctx.currentTime;
-  if (when < nowCtx + 0.02) { // target already passed → join at the right spot
-    seekS += (nowCtx + 0.06) - when;
-    when = nowCtx + 0.06;
-  }
-  if (seekS >= buf.duration) return;
+// True audio position of the current source at AudioContext time ctxT,
+// accounting for every playbackRate trim the servo has applied.
+function posAt(ctxT) {
+  return current.anchorPos + Math.max(0, ctxT - current.anchorCtx) * current.rate;
+}
 
+function startSource(buf, trackId, title, whenCtx, seekS) {
+  stopCurrent();
+  if (seekS >= buf.duration) return;
   const src = ctx.createBufferSource();
   src.buffer = buf;
   src.connect(master);
-  src.start(when, seekS);
-  current = { src, trackId: msg.trackId };
+  src.start(whenCtx, seekS);
+  current = {
+    src, trackId, title,
+    rate: 1, anchorCtx: whenCtx, anchorPos: seekS, startedCtx: whenCtx,
+  };
   src.onended = () => {
     if (current && current.src === src) {
       current = null;
@@ -207,8 +223,46 @@ function startBuffer(buf, msg) {
       send({ type: "state", playing: null });
     }
   };
-  setNowPlaying(msg.title || msg.trackId);
-  send({ type: "state", playing: msg.trackId });
+  setNowPlaying(title || trackId);
+  send({ type: "state", playing: trackId });
+}
+
+function startBuffer(buf, msg) {
+  let when = perfToCtx(msg.atNodeMs + nudgeMs);
+  let seekS = (msg.seekMs || 0) / 1000;
+  const nowCtx = ctx.currentTime;
+  if (when < nowCtx + 0.02) { // target already passed → join at the right spot
+    seekS += (nowCtx + 0.06) - when;
+    when = nowCtx + 0.06;
+  }
+  startSource(buf, msg.trackId, msg.title, when, seekS);
+}
+
+// v2 servo: the conductor says "at your local time L the song should be at P".
+// Compare with where we'll actually be, trim playbackRate microscopically.
+function onSteer(msg) {
+  if (!current || current.trackId !== msg.trackId) return;
+  const targetCtx = perfToCtx(msg.atNodeMs + nudgeMs);
+  if (targetCtx <= current.startedCtx + 0.05) return; // reference predates our start
+  const errS = posAt(targetCtx) - msg.posMs / 1000;   // + = we're ahead
+
+  if (Math.abs(errS) > REANCHOR_S) {
+    // Stall/suspend/mistiming too big to slew away — restart at the ideal spot.
+    const buf = cache.get(msg.trackId);
+    if (!buf) return;
+    const nowCtx = ctx.currentTime;
+    const seekS = msg.posMs / 1000 + (nowCtx + 0.08 - targetCtx);
+    startSource(buf, msg.trackId, current.title, nowCtx + 0.08, seekS);
+  } else {
+    const nowCtx = ctx.currentTime;
+    current.anchorPos = posAt(nowCtx); // re-anchor bookkeeping at the old rate
+    current.anchorCtx = nowCtx;
+    current.rate = 1 - Math.max(-MAX_RATE_TRIM,
+                                Math.min(MAX_RATE_TRIM, errS / STEER_HORIZON_S));
+    current.src.playbackRate.setValueAtTime(current.rate, nowCtx);
+  }
+  send({ type: "steerAck", trackId: msg.trackId,
+         errMs: errS * 1000, rate: current.rate });
 }
 
 function onStop(msg) {

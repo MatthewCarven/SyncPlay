@@ -1,5 +1,23 @@
 # SyncPlay worklog
 
+## 2026-07-16 (late) — v2: mid-song playbackRate servo
+
+The one-shot start left mid-song position at the mercy of each device's DAC
+crystal (a different oscillator than the CPU clock we sync). Now the conductor
+sends each playing node a 2 s-cadence reference ("at your local L, position
+should be P"); nodes trim playbackRate ≤±800 ppm (inaudible) to null the error
+over ~15 s, with a hard in-place re-anchor for >200 ms faults (tab suspend,
+stall) — nodes self-heal. Live per-node error is reported back and shown as an
+"err ms" column on the dashboard. Also: per-node volume pushable from control
+(persisted with nudges), focus-guarded table renders so inputs aren't
+clobbered mid-edit.
+
+Verified live: browser node held err = 0.1 ms with a −2.2 ppm trim; volume
+push landed (gain 0.3 + slider synced); 12/12 tests still green. Noted:
+stale player pages (pre-upgrade) keep playing fine but show "—" for err ms
+until refreshed. Meanwhile Matthew's fleet grew to 4+ real nodes; his
+ID10TError-pc confesses 23 ppm drift — the servo's first real customer.
+
 ## 2026-07-16 (evening) — first real multi-device sync
 
 Beep test passed across PC + phone on Wi-Fi (network "Public" profile;

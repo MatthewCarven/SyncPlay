@@ -47,6 +47,14 @@ flam — then play something.
 5. **Correct:** sparse pings keep the model fresh during playback; dense bursts
    run between songs; every track start is a fresh alignment, so error can't
    accumulate across a playlist.
+6. **Servo (v2):** every 2 s the conductor sends each playing node a reference —
+   *"at your local time L the song should be at position P"*. The node compares
+   its true audio position (which runs on the **DAC's** crystal, a different
+   oscillator than the one clock sync measures) and trims `playbackRate` by up
+   to ±800 ppm (≈1.4 cents — inaudible) to null the error over ~15 s. Errors
+   too big to slew (a suspended tab, a stall) hard re-anchor with an in-place
+   restart. Each node reports its live error back — the **err ms** column on
+   the control page — so you can watch every device hold lock in real time.
 
 ## Cadence & calibration
 
@@ -54,8 +62,9 @@ flam — then play something.
 - During playback → 3 pings / 5 s (a few hundred bytes; inaudible in every sense).
 - Song gap / manual **⇄ resync** → 10-ping bursts.
 - Per-node **nudge** (ms, on the control page) compensates residual speaker/DAC
-  latency: if one device sounds late, give it a negative nudge. Nudges persist
-  in `syncplay_state.json`.
+  latency: if one device sounds late, give it a negative nudge. Per-node
+  **volume** is also pushable from the control page. Both persist in
+  `syncplay_state.json`.
 
 ## Notes & limits (v1)
 
@@ -64,10 +73,9 @@ flam — then play something.
   the current + next track only. Phones are fine with this.
 - Format support = whatever the node's browser decodes: MP3/AAC/WAV/FLAC work
   everywhere modern; OGG/Opus not on iOS Safari.
-- A one-shot start is good to roughly ±(RTT jitter + a few ms) per device;
-  drift between song starts is pre-compensated by the slope model. Mid-song
-  rate micro-correction (for hour-long tracks / same-room echo hunting) is the
-  planned v2.
+- Nodes must (re)load the player page after a server upgrade to pick up new
+  player code — a stale page still plays, it just lacks the newest features
+  (e.g. the servo shows "—" for err ms until refreshed).
 - iPhones: silent-mode switch must be OFF for Web Audio to sound.
 
 ## Verifying sync with your ears and a mic

@@ -61,22 +61,40 @@ function mmss(ms) {
 function render() {
   if (!snap) return;
 
-  // nodes
+  // Don't clobber an input mid-edit: skip table rebuilds while one is focused.
+  const active = document.activeElement;
+  const editing = active && active.closest && active.closest("#nodeRows");
+  if (!editing) renderNodeTable();
+
+  renderPlaylist();
+  renderNowLine();
+}
+
+function renderNodeTable() {
   const rows = snap.nodes.map((n) => {
     const state = n.playing ? "♪ playing" : (n.loadedCurrent ? "ready" : (n.connected ? "idle" : "gone"));
+    const err = n.playing ? fmt(n.syncErrMs, 1) : "—";
+    const ratePpm = (n.ratePpm === null || n.ratePpm === undefined)
+      ? "" : ` title="servo rate: ${n.ratePpm >= 0 ? "+" : ""}${n.ratePpm.toFixed(0)} ppm"`;
     return `<tr>
       <td><span class="dot ${n.connected ? "ok" : ""}"></span>${esc(n.name)}</td>
       <td class="num">${fmt(n.offsetMs, 2)}</td>
       <td class="num">${fmt(n.bestRttMs, 1)}</td>
       <td class="num">${fmt(n.skewPpm, 1)}</td>
+      <td class="num"${ratePpm}>${err}</td>
       <td class="num hideSm">${n.nUsed}/${n.nSamples}</td>
       <td class="num"><input class="nudge" type="number" step="5" value="${n.nudgeMs}"
-            onchange="setNudge('${n.id}', this.value)"></td>
+            onchange="setNudge('${n.id}', this.value); this.blur()"></td>
+      <td><input class="volSlider" type="range" min="0" max="100" value="${n.volume ?? 80}"
+            onchange="setVol('${n.id}', this.value); this.blur()"></td>
       <td class="pill">${state}</td>
     </tr>`;
   });
   $("nodeRows").innerHTML = rows.join("");
   $("nodesEmpty").style.display = snap.nodes.length ? "none" : "block";
+}
+
+function renderPlaylist() {
 
   // playlist
   const nowId = snap.playing ? snap.playing.trackId : null;
@@ -89,8 +107,6 @@ function render() {
   $("tracksEmpty").textContent = snap.tracks.length ? "" :
     `no audio files found in ${snap.musicDir} — drop some in and hit ↻ rescan`;
   $("tracksEmpty").style.display = snap.tracks.length ? "none" : "block";
-
-  renderNowLine();
 }
 
 function renderNowLine() {
@@ -117,6 +133,7 @@ setInterval(renderNowLine, 500);
 // --- helpers (also used from inline handlers) --------------------------------------
 window.playTrack = (trackId) => cmd({ cmd: "play", trackId });
 window.setNudge = (nodeId, v) => cmd({ cmd: "nudge", nodeId, nudgeMs: parseFloat(v) || 0 });
+window.setVol = (nodeId, v) => cmd({ cmd: "volume", nodeId, volume: parseInt(v, 10) });
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
