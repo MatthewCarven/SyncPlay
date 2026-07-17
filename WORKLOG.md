@@ -23,6 +23,17 @@ can act as distinct test nodes.
 Next real-world data point: closure numbers across actual Wi-Fi devices —
 expect single-digit ms, dominated by Wi-Fi asymmetry.
 
+**Real-fleet results (same day):** 5:40 into a 30-min mix, three nodes all
+playing — servo err: laptop −0.0 ms, pc 0.4 ms (its 22.2 ppm crystal means
+~7.5 ms of drift already absorbed mid-song), phone 0.7 ms. Mesh closures all
+green: laptop↔pc 0.10 ms (n=96), laptop↔phone 1.39 ms, phone↔pc −1.15 ms
+(phone pairs young, n=1–2). Bonus consistency proof: the three *direct*
+measurements close their own triangle to 0.14 ms
+(−359,971.53 + 354,582.80 = −5,388.73 vs measured −5,388.87). Every device
+in the house is synced to well under the width of a speaker cabinet, and the
+system now proves its own honesty three independent ways. Matthew verdict:
+"Epic Awesome".
+
 ## 2026-07-16 (late) — v2: mid-song playbackRate servo
 
 The one-shot start left mid-song position at the mercy of each device's DAC
