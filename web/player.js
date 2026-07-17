@@ -11,8 +11,14 @@
 const clientId = (() => {
   let id = localStorage.getItem("syncplay.clientId");
   if (!id) {
-    id = (crypto.randomUUID && crypto.randomUUID()) ||
-         ("id-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+    if (crypto.randomUUID) {
+      id = crypto.randomUUID();
+    } else {
+      // Plain-http LAN origins aren't "secure contexts", so randomUUID is
+      // unavailable on real devices — but getRandomValues works everywhere.
+      const b = crypto.getRandomValues(new Uint8Array(16));
+      id = "id-" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+    }
     localStorage.setItem("syncplay.clientId", id);
   }
   return id;

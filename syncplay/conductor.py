@@ -592,7 +592,8 @@ class Conductor:
                 await node.ws.close()  # stale socket from a previous page-life
             node.end_session()
         node.begin_session(ws, str(hello.get("ua", ""))[:120])
-        log.info("node joined: %s (%s)", node.name, node.client_id[:8])
+        # Tail slice: date-based fallback ids all share the same *head*.
+        log.info("node joined: %s (~%s)", node.name, node.client_id[-8:])
 
         await node.send(
             {"type": "welcome", "nodeId": node.client_id, "name": node.name,
