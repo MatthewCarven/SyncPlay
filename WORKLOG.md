@@ -1,5 +1,28 @@
 # SyncPlay worklog
 
+## 2026-07-17 — v3: sync truth matrix (client↔client pings)
+
+Matthew picked the mesh idea off the backlog. Design: WebRTC DataChannels
+(unreliable/unordered ≈ UDP) between nodes, conductor as signaling relay;
+lower clientId initiates; initiator relays raw four-timestamp samples to the
+conductor, which runs a ClockModel per pair — nodes stay dumb, math stays in
+one tested place. Dashboard gains MESH TRUTH: per-pair direct offset vs
+star-implied offset; the difference (triangle closure) is the *measured*
+end-to-end sync error.
+
+Verified with two ?id= dev nodes on the alt conductor (8931): channel
+connected through the relay, 42 filtered samples at 0.8 ms rtt, and the
+headline number — **closure 0.12 ms**: direct measurement and star inference
+agree to ~120 µs on one machine. Pair teardown on node leave works. Zero
+console errors. Also shipped: Cache-Control no-cache middleware after
+catching a browser serving pre-mesh player.js from cache (this also ends
+the "refresh your phone to get new features" era — pages now revalidate
+on every reload), and a ?id= URL override so several tabs in one browser
+can act as distinct test nodes.
+
+Next real-world data point: closure numbers across actual Wi-Fi devices —
+expect single-digit ms, dominated by Wi-Fi asymmetry.
+
 ## 2026-07-16 (late) — v2: mid-song playbackRate servo
 
 The one-shot start left mid-song position at the mercy of each device's DAC

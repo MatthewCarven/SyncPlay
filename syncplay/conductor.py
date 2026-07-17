@@ -19,7 +19,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from aiohttp import WSMsgType, web
 
@@ -86,6 +86,7 @@ class Node:
         self.model = ClockModel()
         self.connected = False
         self.ua = ""
+        self.mesh = False  # page supports client<->client ping channels
         self.ping_seq = 0
         self.pending: Dict[int, float] = {}  # ping id -> t0
         self.loaded: Set[str] = set()  # track ids decoded and ready this page-life
@@ -169,6 +170,10 @@ class Conductor:
         self._transport_task: Optional[asyncio.Task] = None
         self._pulse_task: Optional[asyncio.Task] = None
         self._state: dict = self._load_state()
+        # Mesh truth: per ordered pair (initiator, responder) of node ids, a
+        # ClockModel whose timeline is the *initiator's* clock. Diagnostic only.
+        self.mesh_pairs: Dict[Tuple[str, str], ClockModel] = {}
+        self.mesh_seen: Dict[Tuple[str, str], float] = {}
         self.scan_tracks()
 
     # --- library ------------------------------------------------------------
@@ -259,6 +264,11 @@ class Conductor:
                                 }
                             )
                 await self._steer_all()
+                # Drop mesh pairs that stopped reporting (channel died quietly).
+                stale = [k for k, seen in self.mesh_seen.items() if now() - seen > 90.0]
+                for k in stale:
+                    self.mesh_pairs.pop(k, None)
+                    self.mesh_seen.pop(k, None)
 
     # --- state pushes -----------------------------------------------------------
 
@@ -294,7 +304,41 @@ class Conductor:
             ],
             "musicDir": str(self.music_dir),
             "nodes": [n.stats(current) for n in self.nodes.values()],
+            "mesh": self._mesh_snapshot(),
         }
+
+    def _mesh_snapshot(self) -> List[dict]:
+        """Triangle closure per measured pair: direct(A<->B) minus star-implied.
+
+        The mismatch is the *measured* end-to-end sync error between two
+        nodes — the number the whole star topology only lets us infer.
+        """
+        out: List[dict] = []
+        t = now()
+        for (a_id, b_id), pair_model in self.mesh_pairs.items():
+            a, b = self.nodes.get(a_id), self.nodes.get(b_id)
+            if a is None or b is None or not (a.connected and b.connected):
+                continue
+            pair_est = pair_model.estimate()
+            est_a, est_b = a.model.estimate(), b.model.estimate()
+            if pair_est is None or est_a is None or est_b is None:
+                continue
+            # The pair model's timeline is A's clock: evaluate it "now" by
+            # mapping conductor-now onto A's clock through A's star model.
+            t_a = est_a.to_node_time(t)
+            direct_ms = pair_est.offset_at(t_a) * 1000.0  # B_clock - A_clock
+            star_ms = (est_b.offset_at(t) - est_a.offset_at(t)) * 1000.0
+            out.append(
+                {
+                    "a": a_id, "b": b_id,
+                    "aName": a.name, "bName": b.name,
+                    "directMs": direct_ms,
+                    "closureMs": direct_ms - star_ms,
+                    "rttMs": pair_est.best_rtt * 1000.0,
+                    "n": pair_est.n_used,
+                }
+            )
+        return out
 
     async def push_state(self) -> None:
         if not self.control_sockets:
@@ -543,6 +587,28 @@ class Conductor:
                         }
                     )
 
+    # --- mesh (client<->client ping channels) ---------------------------------
+
+    async def _push_mesh_roster(self) -> None:
+        """Tell every mesh-capable node who its peers are (excluding itself)."""
+        mesh_nodes = [n for n in self.nodes.values() if n.connected and n.mesh]
+        for node in mesh_nodes:
+            await node.send(
+                {
+                    "type": "meshRoster",
+                    "peers": [
+                        {"id": p.client_id, "name": p.name}
+                        for p in mesh_nodes
+                        if p is not node
+                    ],
+                }
+            )
+
+    def _drop_mesh_pairs_for(self, client_id: str) -> None:
+        for key in [k for k in self.mesh_pairs if client_id in k]:
+            self.mesh_pairs.pop(key, None)
+            self.mesh_seen.pop(key, None)
+
     def _preload_msg(self, track: Track) -> dict:
         return {
             "type": "preload",
@@ -580,6 +646,7 @@ class Conductor:
             return ws
 
         name = str(hello.get("name") or f"node-{client_id[:4]}")[:32]
+        supports_mesh = bool(hello.get("mesh"))
         node = self.nodes.get(client_id)
         if node is None:
             node = Node(client_id, name)
@@ -592,14 +659,19 @@ class Conductor:
                 await node.ws.close()  # stale socket from a previous page-life
             node.end_session()
         node.begin_session(ws, str(hello.get("ua", ""))[:120])
+        node.mesh = supports_mesh
+        self._drop_mesh_pairs_for(node.client_id)  # stale pairs from a past life
         # Tail slice: date-based fallback ids all share the same *head*.
-        log.info("node joined: %s (~%s)", node.name, node.client_id[-8:])
+        log.info("node joined: %s (~%s)%s", node.name, node.client_id[-8:],
+                 " [mesh]" if node.mesh else "")
 
         await node.send(
             {"type": "welcome", "nodeId": node.client_id, "name": node.name,
              "nudgeMs": node.nudge_ms, "volume": node.volume}
         )
         node.ping_task = asyncio.create_task(self._ping_loop(node))
+
+        await self._push_mesh_roster()
 
         # If music is (or is about to be) playing, get this node caught up.
         active = self.playing.track if self.playing else None
@@ -619,7 +691,9 @@ class Conductor:
         finally:
             if node.ws is ws:
                 node.end_session()
+                self._drop_mesh_pairs_for(node.client_id)
                 log.info("node left: %s", node.name)
+                await self._push_mesh_roster()
                 await self.push_state()
         return ws
 
@@ -656,6 +730,35 @@ class Conductor:
             await self.toast(
                 f"{node.name} failed to decode {data.get('trackId')}: {data.get('error')}"
             )
+        elif kind == "meshSignal":
+            # Dumb relay: offers/answers/ICE between two nodes.
+            target = self.nodes.get(str(data.get("to")))
+            if target is not None and target.connected:
+                await target.send(
+                    {"type": "meshSignal", "from": node.client_id,
+                     "payload": data.get("payload")}
+                )
+        elif kind == "meshSample":
+            # Raw four-timestamp exchange measured over a peer DataChannel.
+            # Only the pair's initiator (lower id) reports, so keys are unique.
+            peer = str(data.get("peer"))
+            if node.client_id < peer and peer in self.nodes:
+                key = (node.client_id, peer)
+                model = self.mesh_pairs.get(key)
+                if model is None:
+                    model = self.mesh_pairs[key] = ClockModel(window=180.0)
+                try:
+                    model.add(
+                        PingSample(
+                            t0=float(data["t0"]) / 1000.0,
+                            c1=float(data["c1"]) / 1000.0,
+                            c2=float(data["c2"]) / 1000.0,
+                            t3=float(data["t3"]) / 1000.0,
+                        )
+                    )
+                    self.mesh_seen[key] = now()
+                except (KeyError, ValueError, TypeError):
+                    pass
         elif kind == "steerAck":
             try:
                 node.sync_err_ms = float(data["errMs"])
@@ -755,9 +858,19 @@ class Conductor:
         return web.FileResponse(track.path)
 
 
+@web.middleware
+async def _no_cache(request: web.Request, handler):
+    """no-cache (not no-store): browsers must revalidate, so a page reload
+    always picks up new player/control code — 304s keep it instant on LAN.
+    Without this, stale cached pages silently miss protocol upgrades."""
+    resp = await handler(request)
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 def build_app(music_dir: Path) -> web.Application:
     conductor = Conductor(music_dir)
-    app = web.Application()
+    app = web.Application(middlewares=[_no_cache])
     app["conductor"] = conductor
     app.router.add_get("/", conductor.handle_player_page)
     app.router.add_get("/control", conductor.handle_control_page)

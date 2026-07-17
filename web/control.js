@@ -76,8 +76,25 @@ function render() {
   const editing = active && active.closest && active.closest("#nodeRows");
   if (!editing) renderNodeTable();
 
+  renderMesh();
   renderPlaylist();
   renderNowLine();
+}
+
+function renderMesh() {
+  const pairs = snap.mesh || [];
+  $("meshRows").innerHTML = pairs.map((m) => {
+    const mag = Math.abs(m.closureMs);
+    const cls = mag < 2 ? "closureOk" : (mag < 10 ? "closureWarn" : "closureBad");
+    return `<tr>
+      <td>${esc(m.aName)} ↔ ${esc(m.bName)}</td>
+      <td class="num">${m.directMs.toFixed(2)}</td>
+      <td class="num ${cls}">${m.closureMs.toFixed(2)}</td>
+      <td class="num">${m.rttMs.toFixed(1)}</td>
+      <td class="num">${m.n}</td>
+    </tr>`;
+  }).join("");
+  $("meshEmpty").style.display = pairs.length ? "none" : "block";
 }
 
 function renderNodeTable() {

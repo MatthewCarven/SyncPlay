@@ -9,6 +9,10 @@
 
 // --- identity ---------------------------------------------------------------
 const clientId = (() => {
+  // Dev override: ?id=x lets several tabs in ONE browser act as separate
+  // nodes (they'd otherwise share the same localStorage identity).
+  const forced = new URLSearchParams(location.search).get("id");
+  if (forced) return "dev-" + forced.slice(0, 40);
   let id = localStorage.getItem("syncplay.clientId");
   if (!id) {
     if (crypto.randomUUID) {
@@ -109,6 +113,7 @@ function connect() {
       type: "hello", clientId,
       name: localStorage.getItem("syncplay.name"),
       ua: navigator.userAgent.slice(0, 110),
+      mesh: typeof RTCPeerConnection !== "undefined",
     }));
   };
 
@@ -139,6 +144,7 @@ function handle(msg, c1) {
     case "welcome":
       nudgeMs = msg.nudgeMs || 0;
       if (typeof msg.volume === "number") applyVolume(msg.volume);
+      meshTeardown(); // fresh session: the roster that follows rebuilds it
       setStatus(true, `joined as “${msg.name}”`);
       // A reconnect without a page reload keeps our decoded buffers, but the
       // server forgot about them — re-announce so catchup can be instant.
@@ -151,6 +157,12 @@ function handle(msg, c1) {
       break;
     case "steer":
       onSteer(msg);
+      break;
+    case "meshRoster":
+      try { syncMesh(msg.peers || []); } catch (e) { console.warn("mesh roster", e); }
+      break;
+    case "meshSignal":
+      onMeshSignal(msg.from, msg.payload || {});
       break;
     case "preload":
       loadTrack(msg.trackId, msg.url);
@@ -303,6 +315,116 @@ function onBeep(msg) {
   osc.connect(g).connect(master);
   osc.start(when);
   osc.stop(when + 0.15);
+}
+
+// --- mesh: client<->client ping channels (the "sync truth matrix") -----------
+// WebRTC DataChannels with the conductor as signaling relay. Purely
+// diagnostic and fully quarantined from the audio path: raw four-timestamp
+// samples are relayed to the conductor, which does all the math. The pair's
+// lower clientId initiates; unreliable channels behave like UDP on the LAN.
+const mesh = new Map(); // peerId -> {pc, ch, timer}
+
+function meshTeardown() {
+  for (const [, p] of mesh) {
+    try { clearInterval(p.timer); p.pc.close(); } catch (_) {}
+  }
+  mesh.clear();
+}
+
+function syncMesh(peers) {
+  const want = new Set(peers.map((p) => p.id));
+  for (const [id, p] of mesh) {
+    if (!want.has(id)) {
+      try { clearInterval(p.timer); p.pc.close(); } catch (_) {}
+      mesh.delete(id);
+    }
+  }
+  for (const p of peers) {
+    if (p.id !== clientId && clientId < p.id && !mesh.has(p.id)) meshInitiate(p.id);
+  }
+}
+
+function meshEntry(peerId) {
+  const pc = new RTCPeerConnection({ iceServers: [] }); // LAN: no STUN needed
+  pc.onicecandidate = (e) => {
+    if (e.candidate) send({ type: "meshSignal", to: peerId, payload: { cand: e.candidate } });
+  };
+  const entry = { pc, ch: null, timer: null };
+  mesh.set(peerId, entry);
+  return entry;
+}
+
+async function meshInitiate(peerId) {
+  try {
+    const entry = meshEntry(peerId);
+    const ch = entry.pc.createDataChannel("pings", { ordered: false, maxRetransmits: 0 });
+    meshWireInitiator(entry, ch, peerId);
+    const offer = await entry.pc.createOffer();
+    await entry.pc.setLocalDescription(offer);
+    send({ type: "meshSignal", to: peerId, payload: { sdp: entry.pc.localDescription } });
+  } catch (err) { console.warn("mesh initiate failed", err); }
+}
+
+function meshWireInitiator(entry, ch, peerId) {
+  entry.ch = ch;
+  let seq = 0;
+  const pending = new Map(); // ping id -> t0
+  ch.onmessage = (e) => {
+    const t3 = performance.now(); // stamp BEFORE parsing, as always
+    let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+    if (m.k === "r" && pending.has(m.id)) {
+      const t0 = pending.get(m.id);
+      pending.delete(m.id);
+      send({ type: "meshSample", peer: peerId, t0, c1: m.c1, c2: m.c2, t3 });
+    }
+  };
+  ch.onopen = () => {
+    entry.timer = setInterval(() => { // burst of 6, 80ms apart, every 8s
+      for (let i = 0; i < 6; i++) {
+        setTimeout(() => {
+          if (ch.readyState !== "open") return;
+          const id = ++seq;
+          pending.set(id, performance.now());
+          if (pending.size > 64) pending.delete(pending.keys().next().value);
+          try { ch.send(JSON.stringify({ k: "p", id })); } catch (_) {}
+        }, i * 80);
+      }
+    }, 8000);
+  };
+  ch.onclose = () => clearInterval(entry.timer);
+}
+
+function meshWireResponder(entry, ch) {
+  entry.ch = ch;
+  ch.onmessage = (e) => {
+    const c1 = performance.now();
+    let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+    if (m.k === "p") {
+      try { ch.send(JSON.stringify({ k: "r", id: m.id, c1, c2: performance.now() })); } catch (_) {}
+    }
+  };
+}
+
+async function onMeshSignal(fromId, payload) {
+  try {
+    let entry = mesh.get(fromId);
+    if (payload.sdp) {
+      if (payload.sdp.type === "offer") {
+        if (!entry) {
+          entry = meshEntry(fromId);
+          entry.pc.ondatachannel = (e) => meshWireResponder(entry, e.channel);
+        }
+        await entry.pc.setRemoteDescription(payload.sdp);
+        const answer = await entry.pc.createAnswer();
+        await entry.pc.setLocalDescription(answer);
+        send({ type: "meshSignal", to: fromId, payload: { sdp: entry.pc.localDescription } });
+      } else if (entry) {
+        await entry.pc.setRemoteDescription(payload.sdp); // answer to our offer
+      }
+    } else if (payload.cand && entry) {
+      await entry.pc.addIceCandidate(payload.cand);
+    }
+  } catch (err) { console.warn("mesh signal error", err); }
 }
 
 // --- ui ----------------------------------------------------------------------

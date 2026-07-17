@@ -51,6 +51,9 @@
   }
   .miniFill { height: 100%; background: var(--accent); }
   .miniTime { color: var(--dim); font-size: .68rem; margin-left: 6px; }
+  td.closureOk { color: var(--accent); }
+  td.closureWarn { color: var(--warn); }
+  td.closureBad { color: var(--bad); }
   tr.trackRow { cursor: default; }
   .playBtn { padding: 3px 10px; }
   #toast {
@@ -94,6 +97,18 @@
       <tbody id="nodeRows"></tbody>
     </table>
     <div class="empty" id="nodesEmpty">no nodes yet — open <b id="playerUrl"></b> on each device and tap JOIN</div>
+  </div>
+
+  <h2>MESH TRUTH <span class="pill">node↔node measured vs star-implied — the mismatch is your real sync error</span></h2>
+  <div class="card" style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>pair</th><th class="num">direct offset ms</th>
+        <th class="num">closure err ms</th><th class="num">rtt ms</th><th class="num">n</th>
+      </tr></thead>
+      <tbody id="meshRows"></tbody>
+    </table>
+    <div class="empty" id="meshEmpty">needs ≥2 mesh-capable nodes (player pages loaded after this update)</div>
   </div>
 
   <h2>PLAYLIST</h2>

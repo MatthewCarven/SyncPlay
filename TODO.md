@@ -8,6 +8,12 @@ the player audio path only when unavoidable, one commit per feature so
 ## Done
 - [x] Read-only per-node position bar on the control page (2026-07-17) —
   ideal timeline + each node's reported err ms; zero server changes.
+- [x] Client↔client "sync truth matrix" (2026-07-17) — WebRTC DataChannel
+  pings, conductor as signaling relay, per-pair ClockModels server-side,
+  triangle-closure column on the dashboard. First live result: two
+  same-machine nodes, closure 0.12 ms.
+- [x] Cache-Control: no-cache middleware — stale player pages after upgrades
+  are extinct (found the hard way when a cached page lacked the mesh code).
 
 ## Next candidates
 
