@@ -45,6 +45,12 @@
     border: 1px solid var(--edge); border-radius: 6px; padding: 4px 6px; text-align: right;
   }
   input.volSlider { width: 72px; accent-color: var(--accent); vertical-align: middle; }
+  .miniBar {
+    width: 64px; height: 4px; background: var(--edge); border-radius: 2px;
+    display: inline-block; vertical-align: middle; overflow: hidden;
+  }
+  .miniFill { height: 100%; background: var(--accent); }
+  .miniTime { color: var(--dim); font-size: .68rem; margin-left: 6px; }
   tr.trackRow { cursor: default; }
   .playBtn { padding: 3px 10px; }
   #toast {
@@ -81,6 +87,7 @@
       <thead><tr>
         <th>node</th><th class="num">offset ms</th><th class="num">best rtt</th>
         <th class="num">drift ppm</th><th class="num" title="live playback position error vs the conductor's ideal timeline">err ms</th>
+        <th title="where this node actually is in the song (read-only)">position</th>
         <th class="num hideSm">samples</th>
         <th class="num">nudge ms</th><th>vol</th><th>state</th>
       </tr></thead>

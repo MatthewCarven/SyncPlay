@@ -6,6 +6,12 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "syncplay", "--music-dir", "music", "--verbose"],
       "port": 8927
+    },
+    {
+      "name": "syncplay-alt",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "syncplay", "--music-dir", "music", "--port", "8931"],
+      "port": 8931
     }
   ]
 }

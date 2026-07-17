@@ -58,6 +58,16 @@ function mmss(ms) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+// Where this node's audio actually is in the current song: the conductor's
+// ideal timeline plus the node's own reported servo error. Read-only.
+function nodePosMs(n) {
+  const p = snap.playing;
+  if (!p || n.playing !== p.trackId) return null;
+  const elapsed = performance.now() - snapAtPerf;
+  const ideal = (snap.serverNowMs + elapsed) - p.tStartMs + p.seekMs;
+  return Math.max(0, ideal + (n.syncErrMs || 0));
+}
+
 function render() {
   if (!snap) return;
 
@@ -82,6 +92,7 @@ function renderNodeTable() {
       <td class="num">${fmt(n.bestRttMs, 1)}</td>
       <td class="num">${fmt(n.skewPpm, 1)}</td>
       <td class="num"${ratePpm}>${err}</td>
+      ${posCellFor(n)}
       <td class="num hideSm">${n.nUsed}/${n.nSamples}</td>
       <td class="num"><input class="nudge" type="number" step="5" value="${n.nudgeMs}"
             onchange="setNudge('${n.id}', this.value); this.blur()"></td>
@@ -131,6 +142,15 @@ function renderNowLine() {
 setInterval(renderNowLine, 500);
 
 // --- helpers (also used from inline handlers) --------------------------------------
+function posCellFor(n) {
+  const pos = nodePosMs(n);
+  const dur = snap.playing && snap.playing.durationMs;
+  if (pos === null || !dur) return `<td class="pill">—</td>`;
+  const pct = Math.min(100, 100 * pos / dur);
+  return `<td><div class="miniBar"><div class="miniFill" style="width:${pct}%"></div></div>` +
+         `<span class="miniTime">${mmss(pos)}</span></td>`;
+}
+
 window.playTrack = (trackId) => cmd({ cmd: "play", trackId });
 window.setNudge = (nodeId, v) => cmd({ cmd: "nudge", nodeId, nudgeMs: parseFloat(v) || 0 });
 window.setVol = (nodeId, v) => cmd({ cmd: "volume", nodeId, volume: parseInt(v, 10) });
