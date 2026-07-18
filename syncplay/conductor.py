@@ -54,6 +54,18 @@ def now() -> float:
     return time.perf_counter()
 
 
+def _clean_eq(vals) -> List[float]:
+    """Coerce arbitrary input into exactly 5 EQ gains (dB), each clamped to ±12."""
+    out = [0.0] * 5
+    if isinstance(vals, (list, tuple)):
+        for i in range(min(5, len(vals))):
+            try:
+                out[i] = max(-12.0, min(12.0, float(vals[i])))
+            except (ValueError, TypeError):
+                pass
+    return out
+
+
 @dataclass
 class Track:
     id: str
@@ -82,6 +94,7 @@ class Node:
         self.name = name
         self.nudge_ms = 0.0
         self.volume: Optional[int] = None  # None = never set from control
+        self.eq_db: List[float] = [0.0] * 5  # per-node output EQ, pushed from control
         self.ws: Optional[web.WebSocketResponse] = None
         self.model = ClockModel()
         self.connected = False
@@ -133,6 +146,7 @@ class Node:
             "ua": self.ua,
             "nudgeMs": self.nudge_ms,
             "volume": self.volume,
+            "eqDb": self.eq_db,
             "syncErrMs": self.sync_err_ms,
             "ratePpm": (self.play_rate - 1.0) * 1e6 if self.play_rate else None,
             "playing": self.playing_track,
@@ -211,9 +225,10 @@ class Conductor:
             return {
                 "nudges": {str(k): float(v) for k, v in data.get("nudges", {}).items()},
                 "volumes": {str(k): int(v) for k, v in data.get("volumes", {}).items()},
+                "eqs": {str(k): _clean_eq(v) for k, v in data.get("eqs", {}).items()},
             }
         except (OSError, ValueError, TypeError):
-            return {"nudges": {}, "volumes": {}}
+            return {"nudges": {}, "volumes": {}, "eqs": {}}
 
     def _save_state(self) -> None:
         try:
@@ -224,6 +239,10 @@ class Conductor:
                     self._state["nudges"].pop(n.client_id, None)
                 if n.volume is not None:
                     self._state["volumes"][n.client_id] = n.volume
+                if any(n.eq_db):
+                    self._state["eqs"][n.client_id] = n.eq_db
+                else:
+                    self._state["eqs"].pop(n.client_id, None)
             STATE_FILE.write_text(json.dumps(self._state, indent=1), "utf-8")
         except OSError as e:
             log.warning("could not persist state: %s", e)
@@ -653,6 +672,7 @@ class Conductor:
             node = Node(client_id, name)
             node.nudge_ms = self._state["nudges"].get(client_id, 0.0)
             node.volume = self._state["volumes"].get(client_id)
+            node.eq_db = self._state["eqs"].get(client_id, [0.0] * 5)
             self.nodes[client_id] = node
         else:
             node.name = name
@@ -668,7 +688,7 @@ class Conductor:
 
         await node.send(
             {"type": "welcome", "nodeId": node.client_id, "name": node.name,
-             "nudgeMs": node.nudge_ms, "volume": node.volume}
+             "nudgeMs": node.nudge_ms, "volume": node.volume, "eqDb": node.eq_db}
         )
         node.ping_task = asyncio.create_task(self._ping_loop(node))
 
@@ -838,7 +858,7 @@ class Conductor:
                     return
                 self._save_state()
                 await node.send({"type": "config", "nudgeMs": node.nudge_ms,
-                                 "volume": node.volume})
+                                 "volume": node.volume, "eqDb": node.eq_db})
                 await self.push_state()
         elif cmd == "volume":
             node = self.nodes.get(str(data.get("nodeId")))
@@ -849,7 +869,15 @@ class Conductor:
                     return
                 self._save_state()
                 await node.send({"type": "config", "nudgeMs": node.nudge_ms,
-                                 "volume": node.volume})
+                                 "volume": node.volume, "eqDb": node.eq_db})
+                await self.push_state()
+        elif cmd == "eq":
+            node = self.nodes.get(str(data.get("nodeId")))
+            if node is not None:
+                node.eq_db = _clean_eq(data.get("eqDb"))
+                self._save_state()
+                await node.send({"type": "config", "nudgeMs": node.nudge_ms,
+                                 "volume": node.volume, "eqDb": node.eq_db})
                 await self.push_state()
         elif cmd == "rescan":
             n = self.scan_tracks()

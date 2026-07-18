@@ -1,5 +1,31 @@
 # SyncPlay worklog
 
+## 2026-07-18 (later) — per-node output EQ (shape them)
+
+The "see them → shape them" sequel to the spectrum meter, and the first tool
+that deliberately alters the node audio path. Five biquads per node in series
+(lowshelf 80, peaking 250/1k/4k, highshelf 12k), spliced source→eq→master, so
+the spectrum tap on master shows the *shaped* result. Control grows a
+vertical-slider bank per node (±12 dB); a change pushes the whole 5-gain array
+on release (like nudge/volume), the conductor clamps + persists in
+`syncplay_state.json` + relays a `config`, and the node ramps each gain via
+`setTargetAtTime` (click-free). Born flat (0 dB = transparent), so it ships as a
+no-op; the beep skips the chain and stays a clean sync reference.
+
+Safety held exactly as designed: filters shape tone, not position — the servo
+reads playback position off `current.*` upstream of the chain and never sees it.
+Verified on the alt conductor (8931) with two dev nodes mid-track: pushing
+[+12,+12,0,0,0] to one node set its live BiquadFilter gains to exactly that
+while the other stayed flat (per-node ✓); the 12 kHz shelf lifted the top
+spectrum bins 3→12 (the low boost just pegged the analyser's 255 ceiling — this
+track's bass already maxes it); `eqs.dev-a` persisted, then "flat" popped it
+back out; and the EQ'd node held **err −0.01 ms** — timing untouched. 12/12
+tests green, no console/server errors. One dev-only wrinkle: two `?id=` tabs
+share `localStorage`, so a reconnect cross-named them — real devices don't.
+
+Next: the mic/HTTPS path turns this manual EQ into closed-loop room correction —
+measure the distortion of the space, bend the signal to cancel it.
+
 ## 2026-07-18 — per-node spectrum ("equalizer") on the control page
 
 Matthew's idea: get audio *back* from the fleet and offer an equalizer. Scoped

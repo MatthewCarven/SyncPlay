@@ -68,6 +68,9 @@ flam — then play something.
 - The control page also shows a live **spectrum** per node — a graphic-EQ meter
   tapped from each node's own audio output (an internal signal tap, not a mic),
   handy for eyeballing at a glance that every device is actually playing.
+- A per-node **output EQ** (5 bands, ±12 dB) on the control page shapes each
+  device's tone — pushed live, persisted, and bypassed by the beep. Additive to
+  the audio path; it shifts timbre, not sync (the servo runs upstream of it).
 
 ## Notes & limits (v1)
 

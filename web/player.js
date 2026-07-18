@@ -40,6 +40,7 @@ let nudgeMs = 0;
 let reconnectDelay = 1000;
 let wakeLock = null;
 let analyser = null;     // taps master to feed the control-page spectrum
+let eq = null;           // per-node output EQ chain: source -> eq -> master
 
 const cache = new Map(); // trackId -> AudioBuffer (capped at 2)
 const loading = new Set();
@@ -86,6 +87,12 @@ $("joinBtn").addEventListener("click", async () => {
   analyser.smoothingTimeConstant = 0.6;
   master.connect(analyser);
   startSpectrum();
+
+  // Per-node output EQ, spliced between every source and master
+  // (source -> eq -> master), so the spectrum tap on master shows the *shaped*
+  // output. Born flat (0 dB = transparent); the beep skips it. Tone only — the
+  // servo reads position off current.*, entirely upstream of these filters.
+  eq = buildEq();
 
   joined = true;
   $("joinView").style.display = "none";
@@ -156,6 +163,7 @@ function handle(msg, c1) {
     case "welcome":
       nudgeMs = msg.nudgeMs || 0;
       if (typeof msg.volume === "number") applyVolume(msg.volume);
+      applyEq(msg.eqDb);
       meshTeardown(); // fresh session: the roster that follows rebuilds it
       setStatus(true, `joined as “${msg.name}”`);
       // A reconnect without a page reload keeps our decoded buffers, but the
@@ -166,6 +174,7 @@ function handle(msg, c1) {
     case "config":
       nudgeMs = msg.nudgeMs || 0;
       if (typeof msg.volume === "number") applyVolume(msg.volume);
+      applyEq(msg.eqDb);
       break;
     case "steer":
       onSteer(msg);
@@ -240,7 +249,7 @@ function startSource(buf, trackId, title, whenCtx, seekS) {
   if (seekS >= buf.duration) return;
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.connect(master);
+  src.connect(eq ? eq.input : master);
   src.start(whenCtx, seekS);
   current = {
     src, trackId, title,
@@ -363,6 +372,42 @@ function sampleSpectrum() {
     bands[k] = peak;
   }
   send({ type: "spectrum", bands });
+}
+
+// --- output EQ ---------------------------------------------------------------
+// Five biquads in series (source -> eq -> master), pushed per-node from the
+// control page and persisted server-side alongside nudge/volume. Shelves at the
+// ends, peaking bands in the middle; ±12 dB. Gains ramp via setTargetAtTime so
+// a slider drag is click-free. Tone only — zero effect on timing or play rate.
+const EQ_BANDS = [
+  { type: "lowshelf",  freq: 80 },
+  { type: "peaking",   freq: 250,   q: 1.0 },
+  { type: "peaking",   freq: 1000,  q: 1.0 },
+  { type: "peaking",   freq: 4000,  q: 1.0 },
+  { type: "highshelf", freq: 12000 },
+];
+
+function buildEq() {
+  const filters = EQ_BANDS.map((b) => {
+    const f = ctx.createBiquadFilter();
+    f.type = b.type;
+    f.frequency.value = b.freq;
+    if (b.q) f.Q.value = b.q;
+    f.gain.value = 0;               // born flat = transparent
+    return f;
+  });
+  for (let i = 0; i < filters.length - 1; i++) filters[i].connect(filters[i + 1]);
+  filters[filters.length - 1].connect(master);
+  return { input: filters[0], filters };
+}
+
+function applyEq(gainsDb) {
+  if (!eq || !Array.isArray(gainsDb)) return;
+  const t = ctx.currentTime;
+  eq.filters.forEach((f, i) => {
+    const g = Math.max(-12, Math.min(12, +gainsDb[i] || 0));
+    f.gain.setTargetAtTime(g, t, 0.02);  // ~60 ms smooth: click-free
+  });
 }
 
 // --- mesh: client<->client ping channels (the "sync truth matrix") -----------

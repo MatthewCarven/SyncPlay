@@ -6,6 +6,13 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] Per-node output EQ pushed from control (2026-07-18) — 5-band biquad chain
+  (80/250/1k/4k/12k Hz, ±12 dB) spliced `source -> eq -> master` on each node,
+  vertical sliders per node on control, persisted in state like nudge/volume,
+  beep bypasses it. Born flat (0 dB = transparent), click-free ramps. Verified
+  per-node (boosting one left the other flat; 12 kHz shelf lifted the top bins)
+  with the EQ'd node holding err −0.01 ms — timing untouched. "Flat" resets a
+  node and drops it from the state file.
 - [x] Per-node spectrum "equalizer" on the control page (2026-07-18) —
   AnalyserNode tapped off each node's `master` bus, 28 log-spaced bands relayed
   over the existing WebSocket (`_broadcast_control`), animated bar-rows on
@@ -23,13 +30,14 @@ the player audio path only when unavoidable, one commit per feature so
 
 ## Next candidates
 
-- [ ] **Per-node output EQ — push a graphic EQ from control to each node**
-  - The natural sequel to the spectrum meter: see them, then shape them. Insert
-    a BiquadFilter chain between each source and `master`; control sends band
-    gains, persisted like nudge/volume. Servo-safe (filters don't move playback
-    position) but it *does* touch the node audio path → its own commit + a
-    bypass toggle. After this, the mic/acoustic path (needs HTTPS) unlocks the
-    measure-then-correct loop already sketched under Later/maybe.
+- [ ] **Closed-loop room correction (needs the HTTPS story first)**
+  - Now that per-node output EQ exists (manual), the payoff is automating it:
+    mic-capture each node's actual acoustic response (chirp/sweep), compute the
+    per-band correction, and drive the same `eq` command the sliders use. `err
+    ms` + spectrum + EQ are the pieces; the mic path is the missing input, and
+    `getUserMedia` needs a secure context (see the HTTPS item under Later/maybe).
+  - "the perfect sphere won't exist in perfect space" — this is the slice that
+    measures the distortion of the space and bends the signal to cancel it.
 
 - [ ] **Party mode — any node can submit a file to the playlist**
   - `POST /upload` on the conductor (size cap ~100 MB, audio-extension

@@ -78,6 +78,7 @@ function render() {
   if (!editing) renderNodeTable();
 
   renderSpectrumWidgets();
+  renderEqWidgets();
   renderMesh();
   renderPlaylist();
   renderNowLine();
@@ -222,6 +223,80 @@ function animateSpectrum(now) {
   requestAnimationFrame(animateSpectrum);
 }
 requestAnimationFrame(animateSpectrum);
+
+// --- output EQ ---------------------------------------------------------------
+// One vertical-slider bank per connected node, mirroring the node's persisted
+// eqDb from the snapshot. A change pushes the whole 5-gain array to the
+// conductor (on release, like nudge/volume), which relays it to the node and
+// saves it. We never overwrite a slider that's being dragged (activeElement
+// guard), so snapshots don't fight the user mid-tweak.
+const EQ_HZ = ["80", "250", "1k", "4k", "12k"];
+const eqRows = new Map();  // nodeId -> {row, name, sliders:[input], vals:[el]}
+const fmtDb = (v) => { const n = Math.round(+v) || 0; return n > 0 ? "+" + n : "" + n; };
+
+function renderEqWidgets() {
+  const panel = $("eqPanel");
+  if (!panel) return;
+  const nodes = snap.nodes.filter((n) => n.connected);
+  const want = new Set(nodes.map((n) => n.id));
+
+  for (const [id, w] of eqRows) {
+    if (!want.has(id)) { w.row.remove(); eqRows.delete(id); }
+  }
+  for (const n of nodes) {
+    let w = eqRows.get(n.id) || buildEqRow(panel, n.id);
+    w.name.textContent = n.name;
+    const gains = Array.isArray(n.eqDb) ? n.eqDb : [0, 0, 0, 0, 0];
+    w.sliders.forEach((s, i) => {
+      if (document.activeElement !== s) {   // don't clobber a live drag
+        s.value = gains[i] ?? 0;
+        w.vals[i].textContent = fmtDb(gains[i]);
+      }
+    });
+  }
+  $("eqEmpty").style.display = nodes.length ? "none" : "block";
+}
+
+function buildEqRow(panel, id) {
+  const row = document.createElement("div");
+  row.className = "eqRow";
+  const name = document.createElement("div");
+  name.className = "eqName";
+  const bands = document.createElement("div");
+  bands.className = "eqBands";
+  const sliders = [], vals = [];
+  for (let i = 0; i < EQ_HZ.length; i++) {
+    const band = document.createElement("div");
+    band.className = "eqBand";
+    const val = document.createElement("div");
+    val.className = "eqVal"; val.textContent = "0";
+    const s = document.createElement("input");
+    s.type = "range"; s.min = "-12"; s.max = "12"; s.step = "1"; s.value = "0";
+    s.oninput = () => { val.textContent = fmtDb(s.value); };        // live label
+    s.onchange = () => { val.textContent = fmtDb(s.value); pushEq(id); }; // commit
+    const hz = document.createElement("div");
+    hz.className = "eqHz"; hz.textContent = EQ_HZ[i];
+    band.append(val, s, hz);
+    bands.appendChild(band);
+    sliders.push(s); vals.push(val);
+  }
+  const flat = document.createElement("button");
+  flat.className = "eqFlat"; flat.textContent = "flat";
+  flat.onclick = () => {
+    sliders.forEach((s, i) => { s.value = "0"; vals[i].textContent = "0"; });
+    pushEq(id);
+  };
+  row.append(name, bands, flat);
+  panel.appendChild(row);
+  const w = { row, name, sliders, vals };
+  eqRows.set(id, w);
+  return w;
+}
+
+function pushEq(id) {
+  const w = eqRows.get(id);
+  if (w) cmd({ cmd: "eq", nodeId: id, eqDb: w.sliders.map((s) => parseFloat(s.value) || 0) });
+}
 
 // --- helpers (also used from inline handlers) --------------------------------------
 function posCellFor(n) {
