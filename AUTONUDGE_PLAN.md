@@ -80,8 +80,10 @@ first, flip HTTPS on for the fleet.
    RMS level meter on control. Verified sans real mic (graceful getUserMedia fail;
    full micMode/micLevel relay + meter math). Real-capture + HTTPS test pending on
    hardware.
-2. Emit sweep on one node + cross-correlate on the mic-node → report ToF for that
-   one speaker — proves the measurement.
+2. **[DONE 2026-07-18]** Chirp emit on one node + time-domain cross-correlation on
+   the mic-node → ToF readout on control. Verified sans real mic (sample-exact
+   correlator, exact ToF round-trip math, capture worklet loads, command wiring).
+   Real acoustic loop + HTTPS pending on hardware.
 3. Sequence all nodes; compute relative nudges; show proposed values on control.
 4. Apply → set nudges via the existing path. Persisted, revertible. Ship.
 

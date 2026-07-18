@@ -44,6 +44,8 @@ let eq = null;           // per-node output EQ chain: source -> eq -> master
 let micStream = null;    // getUserMedia stream when this device is a calibration mic
 let micAnalyser = null;
 let micTimer = null;
+let micCapNode = null;   // AudioWorklet that forwards mic samples during a measurement
+let capActive = null;    // in-flight capture: {seq, need, have, got:[], startFrame}
 
 const cache = new Map(); // trackId -> AudioBuffer (capped at 2)
 const loading = new Set();
@@ -201,6 +203,12 @@ function handle(msg, c1) {
       break;
     case "beep":
       onBeep(msg);
+      break;
+    case "measureEmit":
+      onMeasureEmit(msg);
+      break;
+    case "measureArm":
+      onMeasureArm(msg);
       break;
     case "stats":
       $("stOffset").textContent = msg.offsetMs.toFixed(2);
@@ -445,6 +453,7 @@ async function toggleMic() {
   micAnalyser = ctx.createAnalyser();
   micAnalyser.fftSize = 1024;
   src.connect(micAnalyser);            // sink only — never to ctx.destination
+  await setupCapture(src);             // measurement capture path (step 2)
   const buf = new Float32Array(micAnalyser.fftSize);
   micTimer = setInterval(() => {
     micAnalyser.getFloatTimeDomainData(buf);
@@ -462,6 +471,8 @@ function stopMic() {
   if (micTimer) { clearInterval(micTimer); micTimer = null; }
   if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
   micAnalyser = null;
+  if (micCapNode) { try { micCapNode.disconnect(); } catch (_) {} micCapNode = null; }
+  capActive = null;
   $("micBtn").classList.remove("on");
   $("micBtn").textContent = "🎙️ use as calibration mic";
   setMicStatus("");
@@ -472,6 +483,124 @@ function setMicStatus(text) {
   const el = $("micStatus");
   el.textContent = text;
   el.style.display = text ? "block" : "none";
+}
+
+// --- acoustic measurement (auto-nudge step 2) --------------------------------
+// A speaker node emits a short swept-sine "chirp" at a clock-synced instant; the
+// mic node captures a window and cross-correlates it against the same reference.
+// The correlation peak is the direct-sound arrival — with the synced emit time,
+// that's time-of-flight. Short chirp + short window keeps xcorr cheap enough to
+// run in the time domain (no FFT). The chirp bypasses EQ + volume (fixed level).
+const CHIRP_F0 = 1000, CHIRP_F1 = 8000, CHIRP_S = 0.04;   // 1–8 kHz sweep, 40 ms
+
+function makeChirpArray(sampleRate) {
+  const n = Math.max(1, Math.round(CHIRP_S * sampleRate));
+  const out = new Float32Array(n);
+  const k = (CHIRP_F1 - CHIRP_F0) / CHIRP_S;              // linear sweep rate
+  const denom = n > 1 ? n - 1 : 1;
+  for (let i = 0; i < n; i++) {
+    const t = i / sampleRate;
+    const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / denom);  // Hann taper
+    out[i] = w * Math.sin(2 * Math.PI * (CHIRP_F0 * t + 0.5 * k * t * t));
+  }
+  return out;
+}
+
+// Speaker role: play the chirp at the synced instant, with NO nudge (we're
+// measuring the raw path). Straight to destination at a fixed gain — bypasses
+// the EQ chain and the master volume so the level is known and repeatable.
+function onMeasureEmit(msg) {
+  if (!ctx) return;
+  const when = Math.max(perfToCtx(msg.atNodeMs), ctx.currentTime + 0.02);
+  const data = makeChirpArray(ctx.sampleRate);
+  const buf = ctx.createBuffer(1, data.length, ctx.sampleRate);
+  buf.copyToChannel(data, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const g = ctx.createGain();
+  g.gain.value = 0.4;
+  src.connect(g).connect(ctx.destination);
+  src.start(when);
+}
+
+// Mic role: an AudioWorklet forwards raw input blocks (frame-stamped) only while
+// a capture is armed. Loaded once (via a Blob URL) when the mic turns on.
+const CAP_WORKLET =
+  "class Cap extends AudioWorkletProcessor{" +
+  "constructor(){super();this.left=0;this.port.onmessage=e=>{this.left=e.data.frames|0;};}" +
+  "process(inputs){if(this.left>0){const ch=inputs[0]&&inputs[0][0];" +
+  "if(ch){this.port.postMessage({frame:currentFrame,data:ch.slice(0)});this.left-=ch.length;}}" +
+  "return true;}}registerProcessor('syncplay-cap',Cap);";
+
+async function setupCapture(src) {
+  try {
+    if (!ctx._capReady) {
+      const url = URL.createObjectURL(new Blob([CAP_WORKLET], { type: "application/javascript" }));
+      await ctx.audioWorklet.addModule(url);
+      ctx._capReady = true;
+    }
+    micCapNode = new AudioWorkletNode(ctx, "syncplay-cap");
+    micCapNode.port.onmessage = (e) => onCapBlock(e.data);
+    const mute = ctx.createGain(); mute.gain.value = 0;   // silent sink so it's pulled
+    src.connect(micCapNode); micCapNode.connect(mute).connect(ctx.destination);
+  } catch (_) {
+    micCapNode = null;                                    // no worklet: measurement off, level still works
+  }
+}
+
+function onMeasureArm(msg) {
+  if (!ctx || !micCapNode) { send({ type: "measureResult", seq: msg.seq, error: "no-capture" }); return; }
+  const need = Math.ceil(((msg.windowMs || 550) / 1000) * ctx.sampleRate);
+  capActive = { seq: msg.seq, need, have: 0, got: [], startFrame: -1 };
+  micCapNode.port.postMessage({ frames: need });
+}
+
+function onCapBlock(b) {
+  if (!capActive) return;
+  if (capActive.startFrame < 0) capActive.startFrame = b.frame;
+  capActive.got.push(b.data);
+  capActive.have += b.data.length;
+  if (capActive.have >= capActive.need) finishCapture();
+}
+
+function finishCapture() {
+  const cap = capActive; capActive = null;
+  const sig = new Float32Array(cap.have);
+  let o = 0; for (const blk of cap.got) { sig.set(blk, o); o += blk.length; }
+  const ref = makeChirpArray(ctx.sampleRate);
+  const { lag, peak, snr } = crossCorrelate(sig, ref);
+  const arrivalCtx = (cap.startFrame + lag) / ctx.sampleRate;
+  send({ type: "measureResult", seq: cap.seq, arrivalPerfMs: ctxToPerfMs(arrivalCtx), peak, snr });
+}
+
+// Normalized time-domain cross-correlation: the integer lag where ref best fits
+// inside sig. Returns the peak (0..1) and a crude SNR (peak / mean |corr|).
+function crossCorrelate(sig, ref) {
+  const n = sig.length, m = ref.length;
+  let refE = 0;
+  for (let j = 0; j < m; j++) refE += ref[j] * ref[j];
+  const maxLag = n - m;
+  let best = -Infinity, bestLag = 0, sumAbs = 0, count = 0;
+  for (let lag = 0; lag <= maxLag; lag++) {
+    let dot = 0, sigE = 0;
+    for (let j = 0; j < m; j++) { const s = sig[lag + j]; dot += s * ref[j]; sigE += s * s; }
+    const c = dot / (Math.sqrt(sigE * refE) || 1e-12);
+    sumAbs += Math.abs(c); count++;
+    if (c > best) { best = c; bestLag = lag; }
+  }
+  const meanAbs = count ? sumAbs / count : 1e-9;
+  return { lag: bestLag, peak: best, snr: best / (meanAbs || 1e-9) };
+}
+
+// AudioContext seconds -> performance.now() ms, via the output-timestamp pair
+// (the inverse of perfToCtx; any constant input latency cancels between speakers).
+function ctxToPerfMs(ctxSec) {
+  if (ctx.getOutputTimestamp) {
+    const ts = ctx.getOutputTimestamp();
+    if (ts && ts.contextTime > 0 && ts.performanceTime > 0)
+      return ts.performanceTime + (ctxSec - ts.contextTime) * 1000;
+  }
+  return performance.now() + (ctxSec - ctx.currentTime) * 1000;
 }
 
 // --- mesh: client<->client ping channels (the "sync truth matrix") -----------

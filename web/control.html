@@ -90,6 +90,8 @@
   .calMeter { flex: 1; height: 10px; background: var(--edge); border-radius: 5px; overflow: hidden; }
   .calFill { height: 100%; width: 0; background: var(--accent); transition: width .12s linear; }
   .calDb { flex: none; width: 62px; text-align: right; color: var(--dim); font-size: .68rem; font-variant-numeric: tabular-nums; }
+  .calTools { margin-top: 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .calOut { color: var(--dim); font-size: .72rem; font-variant-numeric: tabular-nums; }
   td.closureOk { color: var(--accent); }
   td.closureWarn { color: var(--warn); }
   td.closureBad { color: var(--bad); }
@@ -154,6 +156,10 @@
   <div class="card">
     <div id="calPanel"></div>
     <div class="empty" id="calEmpty">no calibration mic active</div>
+    <div class="calTools">
+      <button id="measureBtn" title="emit a chirp on a speaker, cross-correlate it at the mic — stop playback first">📏 measure ToF (first speaker → mic)</button>
+      <span id="measureOut" class="calOut">—</span>
+    </div>
   </div>
 
   <h2>MESH TRUTH <span class="pill">node↔node measured vs star-implied — the mismatch is your real sync error</span></h2>

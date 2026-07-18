@@ -191,6 +191,9 @@ class Conductor:
         # ClockModel whose timeline is the *initiator's* clock. Diagnostic only.
         self.mesh_pairs: Dict[Tuple[str, str], ClockModel] = {}
         self.mesh_seen: Dict[Tuple[str, str], float] = {}
+        # Acoustic measurement (auto-nudge step 2): one in-flight ToF probe.
+        self._measure_seq = 0
+        self._measure_pending: Optional[dict] = None
         self.scan_tracks()
 
     # --- library ------------------------------------------------------------
@@ -582,6 +585,44 @@ class Conductor:
                     n += 1
         await self.toast(f"Beep scheduled on {n} node(s) - listen for one single beep.")
 
+    async def _measure_one(self, speaker_id: str) -> None:
+        """Emit a chirp on one speaker at a synced instant; the mic node cross-
+        correlates it into a time-of-flight. Auto-nudge groundwork (step 2).
+
+        The reported ToF carries a constant per-mic offset (mic input latency +
+        the ctx->perf mapping bias), so only *differences* between speakers are
+        physical — which is exactly what step 3 will difference into nudges.
+        """
+        mics = [n for n in self.nodes.values() if n.connected and n.mic]
+        if len(mics) != 1:
+            await self.toast("Calibration needs exactly one active mic node.")
+            return
+        mic = mics[0]
+        spk = self.nodes.get(speaker_id)
+        if spk is None or not spk.connected or spk is mic:
+            spk = next((n for n in self.nodes.values()
+                        if n.connected and n is not mic), None)
+        if spk is None:
+            await self.toast("No speaker node to measure.")
+            return
+        if self.playing is not None:
+            await self.toast("Stop playback before calibrating.")
+            return
+        est_s, est_m = spk.model.estimate(), mic.model.estimate()
+        if est_s is None or est_m is None:
+            await self.toast("Clocks not converged yet - give it a few seconds.")
+            return
+        self._measure_seq += 1
+        seq = self._measure_seq
+        t_emit = now() + 0.4
+        self._measure_pending = {
+            "seq": seq, "spk": spk.client_id, "mic": mic.client_id, "t_emit": t_emit,
+        }
+        await mic.send({"type": "measureArm", "seq": seq, "windowMs": 550})
+        await spk.send({"type": "measureEmit", "seq": seq,
+                        "atNodeMs": est_s.to_node_time(t_emit) * 1000.0})
+        await self.toast(f"Measuring {spk.name} -> {mic.name}...")
+
     async def _steer_all(self) -> None:
         """v2 servo reference: 'at your local time L the song should be at P'.
 
@@ -822,6 +863,34 @@ class Conductor:
                 await self._broadcast_control(
                     {"type": "micLevel", "nodeId": node.client_id, "rms": rms}
                 )
+        elif kind == "measureResult":
+            pend = self._measure_pending
+            if pend is None or data.get("seq") != pend["seq"] or node.client_id != pend["mic"]:
+                return
+            self._measure_pending = None
+            if data.get("error"):
+                await self.toast(f"Measurement failed: {data.get('error')}")
+                return
+            est_m = node.model.estimate()
+            if est_m is None:
+                return
+            try:
+                arrival = est_m.to_conductor_time(float(data["arrivalPerfMs"]) / 1000.0)
+            except (KeyError, ValueError, TypeError):
+                return
+            tof_ms = (arrival - pend["t_emit"]) * 1000.0
+            spk = self.nodes.get(pend["spk"])
+            await self._broadcast_control(
+                {
+                    "type": "measureToF",
+                    "speakerId": pend["spk"],
+                    "speakerName": spk.name if spk else pend["spk"],
+                    "micId": pend["mic"],
+                    "tofMs": tof_ms,
+                    "peak": data.get("peak"),
+                    "snr": data.get("snr"),
+                }
+            )
 
     async def handle_control_ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20.0)
@@ -865,6 +934,8 @@ class Conductor:
             self.dispatch(self._transport_stop())
         elif cmd == "beep":
             self.dispatch(self._transport_beep())
+        elif cmd == "measure":
+            asyncio.create_task(self._measure_one(str(data.get("speakerId") or "")))
         elif cmd == "resync":
             self.request_burst(4.0)
             await self.toast("Resync burst running on all nodes.")

@@ -1,5 +1,37 @@
 # SyncPlay worklog
 
+## 2026-07-18 (later, iv) — chirp time-of-flight measurement (auto-nudge step 2)
+
+The measurement engine from [AUTONUDGE_PLAN.md](AUTONUDGE_PLAN.md) step 2: a
+speaker emits a short swept-sine chirp at a clock-synced instant, the mic node
+captures a window and cross-correlates it against the same reference → the
+correlation peak is the direct-sound arrival, and arrival − synced-emit =
+time-of-flight. The speaker plays a 40 ms, 1–8 kHz chirp straight to destination
+at a fixed gain (bypasses EQ + volume + nudge — we measure the *raw* path). The
+mic captures via a Blob-loaded AudioWorklet that forwards frame-stamped input
+blocks only while armed; a normalized time-domain xcorr (short chirp + short
+window → no FFT) finds the lag; the arrival ctx-time maps to perf-time via
+`getOutputTimestamp` and is reported. The conductor picks `t_emit`, converts it
+to each node's local clock (like the beep), and on the mic's reply maps arrival
+back with `to_conductor_time` → ToF, shown on a new "measure" readout in the
+CALIBRATION card. The ToF carries a constant per-mic offset (input latency +
+mapping bias); only *differences* between speakers are physical — exactly what
+step 3 will difference into nudges.
+
+Verified everything short of a physical mic (sandbox blocks capture): the
+cross-correlator recovers planted delays to the **sample** (500/1500/4800/12000
+→ exact, peak ~0.994, snr 62–92 through an 8% noise floor); the ToF round-trip
+math is exact in Python (0/5/30 ms in → 0/5/30 out, 123 ms offset recovered);
+`onMeasureEmit` schedules the chirp without error; the capture worklet
+compiles/registers/instantiates; the `measure` command routes + guards ("needs
+exactly one active mic node"); the readout renders. 12/12 tests green, no
+console/server errors.
+
+Pending on hardware: the real acoustic loop — a mic capturing a real chirp off a
+speaker — and HTTPS for the fleet. Next (steps 3–4): sequence all speakers,
+difference the ToFs into per-node nudges, show proposed, apply via the existing
+nudge path.
+
 ## 2026-07-18 (later still) — calibration-mic plumbing (auto-nudge step 1)
 
 First bite of the mic slice from [AUTONUDGE_PLAN.md](AUTONUDGE_PLAN.md): opt a

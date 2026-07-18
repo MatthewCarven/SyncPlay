@@ -24,6 +24,7 @@ function connect() {
       micLevels.set(msg.nodeId, { rms: msg.rms, at: performance.now() });
       if (snap) renderCalibration();   // faster than the 1 Hz snapshot: lively meter
     }
+    else if (msg.type === "measureToF") showMeasure(msg);
   };
   ws.onclose = () => {
     $("connState").textContent = "· reconnecting…";
@@ -52,6 +53,7 @@ $("btnStop").onclick = () => cmd({ cmd: "stop" });
 $("btnBeep").onclick = () => cmd({ cmd: "beep" });
 $("btnResync").onclick = () => cmd({ cmd: "resync" });
 $("btnRescan").onclick = () => cmd({ cmd: "rescan" });
+$("measureBtn").onclick = () => cmd({ cmd: "measure" });
 
 // --- rendering -------------------------------------------------------------------
 const fmt = (v, digits, dash = "—") =>
@@ -340,6 +342,13 @@ function renderCalibration() {
     w.db.textContent = !fresh ? "—" : (dbfs > -99 ? dbfs.toFixed(0) + " dB" : "quiet");
   }
   $("calEmpty").style.display = mics.length ? "none" : "block";
+}
+
+function showMeasure(m) {
+  const peak = (m.peak != null) ? ` · peak ${(+m.peak).toFixed(2)}` : "";
+  const snr = (m.snr != null) ? ` · snr ${(+m.snr).toFixed(1)}` : "";
+  $("measureOut").textContent =
+    `${m.speakerName} → mic: ToF ${(+m.tofMs).toFixed(2)} ms${peak}${snr}`;
 }
 
 // --- helpers (also used from inline handlers) --------------------------------------
