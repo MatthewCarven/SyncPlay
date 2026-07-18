@@ -80,6 +80,16 @@
   .eqHz { color: var(--dim); font-size: .6rem; letter-spacing: .04em; }
   .eqVal { color: var(--text); font-size: .64rem; font-variant-numeric: tabular-nums; }
   .eqFlat { padding: 4px 12px; font-size: .72rem; }
+  /* calibration */
+  #calPanel { display: flex; flex-direction: column; gap: 10px; }
+  .calRow { display: flex; align-items: center; gap: 12px; }
+  .calName {
+    flex: none; width: 140px; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .calMeter { flex: 1; height: 10px; background: var(--edge); border-radius: 5px; overflow: hidden; }
+  .calFill { height: 100%; width: 0; background: var(--accent); transition: width .12s linear; }
+  .calDb { flex: none; width: 62px; text-align: right; color: var(--dim); font-size: .68rem; font-variant-numeric: tabular-nums; }
   td.closureOk { color: var(--accent); }
   td.closureWarn { color: var(--warn); }
   td.closureBad { color: var(--bad); }
@@ -138,6 +148,12 @@
   <div class="card">
     <div id="eqPanel"></div>
     <div class="empty" id="eqEmpty">no nodes yet</div>
+  </div>
+
+  <h2>CALIBRATION <span class="pill">tap “use as calibration mic” on a device — Phase 1: level check</span></h2>
+  <div class="card">
+    <div id="calPanel"></div>
+    <div class="empty" id="calEmpty">no calibration mic active</div>
   </div>
 
   <h2>MESH TRUTH <span class="pill">node↔node measured vs star-implied — the mismatch is your real sync error</span></h2>

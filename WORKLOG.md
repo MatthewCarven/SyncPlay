@@ -1,5 +1,31 @@
 # SyncPlay worklog
 
+## 2026-07-18 (later still) — calibration-mic plumbing (auto-nudge step 1)
+
+First bite of the mic slice from [AUTONUDGE_PLAN.md](AUTONUDGE_PLAN.md): opt a
+device into being a measurement microphone and prove the pipeline — no DSP yet.
+Player page gets a "🎙️ use as calibration mic" button → `getUserMedia` (secure
+context only; echo/noise/AGC off), RMS off an AnalyserNode every 120 ms, reported
+as `micLevel`. The mic is a **sink only** — never routed to the speakers, so no
+monitoring feedback. Conductor gains `micMode` (sets `node.mic`, snapshotted) and
+`micLevel` (relayed to control via `_broadcast_control`; self-heals mic state on
+reconnect). Control grows a CALIBRATION card: a live dBFS input meter per mic node.
+
+Verified on the alt conductor (8931) — everything the sandbox allows without a
+real mic. Secure context + `getUserMedia` present and invoked; capture blocked by
+the pane → caught cleanly as "mic unavailable: NotAllowedError", button resets, no
+crash or console errors (exactly the graceful-fail path that matters on plain-http
+LAN before HTTPS lands). Plumbing proven by injecting the messages a mic would
+send: `micMode` propagated to `node.mic` and rendered the meter row; `micLevel`
+relayed through the conductor; meter math checks out across the range (rms 0.1 →
+−20 dB/67%, 0.5 → −6 dB/90%, 0.002 → −54 dB/10%), decaying to "—" when stale.
+12/12 tests green.
+
+Untested here (needs real hardware): actual capture + RMS from a live mic, and the
+HTTPS gate for the real fleet — meatthread0's bench test with the laptop array /
+the 4-capsule unit. Next (plan steps 2–4): scheduled sweep emit + cross-correlation
+→ time-of-flight → auto-nudge.
+
 ## 2026-07-18 (later) — per-node output EQ (shape them)
 
 The "see them → shape them" sequel to the spectrum meter, and the first tool

@@ -50,6 +50,13 @@
   .stat .k { font-size: .62rem; color: var(--dim); letter-spacing: .08em; margin-top: 3px; }
   label.vol { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: .75rem; }
   input[type=range] { flex: 1; accent-color: var(--accent); }
+  #micBtn {
+    width: 100%; margin-top: 14px; padding: 12px; font: inherit;
+    color: var(--text); background: var(--bg); border: 1px solid var(--edge);
+    border-radius: 8px; cursor: pointer;
+  }
+  #micBtn.on { border-color: var(--accent); color: var(--accent); }
+  #micStatus { margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -74,6 +81,8 @@
         <div class="stat"><div class="v" id="stSkew">—</div><div class="k">DRIFT ppm</div></div>
       </div>
       <label class="vol">vol <input type="range" id="vol" min="0" max="100" value="80"></label>
+      <button id="micBtn">🎙️ use as calibration mic</button>
+      <div id="micStatus" class="hint" style="display:none"></div>
     </div>
   </div>
   <script src="/static/player.js"></script>

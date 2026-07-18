@@ -41,6 +41,9 @@ let reconnectDelay = 1000;
 let wakeLock = null;
 let analyser = null;     // taps master to feed the control-page spectrum
 let eq = null;           // per-node output EQ chain: source -> eq -> master
+let micStream = null;    // getUserMedia stream when this device is a calibration mic
+let micAnalyser = null;
+let micTimer = null;
 
 const cache = new Map(); // trackId -> AudioBuffer (capped at 2)
 const loading = new Set();
@@ -104,6 +107,8 @@ $("joinBtn").addEventListener("click", async () => {
 $("vol").addEventListener("input", () => {
   if (master) master.gain.value = $("vol").value / 100;
 });
+
+$("micBtn").addEventListener("click", toggleMic);
 
 function applyVolume(v) { // pushed from the control page
   $("vol").value = v;
@@ -408,6 +413,65 @@ function applyEq(gainsDb) {
     const g = Math.max(-12, Math.min(12, +gainsDb[i] || 0));
     f.gain.setTargetAtTime(g, t, 0.02);  // ~60 ms smooth: click-free
   });
+}
+
+// --- calibration mic ---------------------------------------------------------
+// Opt-in: turn this device into a measurement microphone. Captures input via
+// getUserMedia (secure context only — HTTPS on the LAN, or localhost), computes
+// a running RMS off an AnalyserNode, and reports the level so the control page
+// can confirm the mic hears the room. Phase 1 groundwork for auto-nudge — no
+// stimulus or cross-correlation yet. The mic is a sink only: never routed to
+// the speakers, so there's no monitoring feedback.
+const MIC_MS = 120;
+
+async function toggleMic() {
+  if (micStream) { stopMic(); return; }
+  if (!ctx) { setMicStatus("join first — that unlocks audio"); return; }
+  const md = navigator.mediaDevices;
+  if (!md || !md.getUserMedia) {
+    setMicStatus("mic needs a secure context (HTTPS on the LAN, or localhost)");
+    return;
+  }
+  try {
+    micStream = await md.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    });
+  } catch (err) {
+    micStream = null;
+    setMicStatus("mic unavailable: " + ((err && err.name) || err));
+    return;
+  }
+  const src = ctx.createMediaStreamSource(micStream);
+  micAnalyser = ctx.createAnalyser();
+  micAnalyser.fftSize = 1024;
+  src.connect(micAnalyser);            // sink only — never to ctx.destination
+  const buf = new Float32Array(micAnalyser.fftSize);
+  micTimer = setInterval(() => {
+    micAnalyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    send({ type: "micLevel", rms: Math.sqrt(sum / buf.length) });
+  }, MIC_MS);
+  $("micBtn").classList.add("on");
+  $("micBtn").textContent = "🎙️ calibration mic ON — tap to stop";
+  setMicStatus("listening — watch the level on the control page");
+  send({ type: "micMode", on: true });
+}
+
+function stopMic() {
+  if (micTimer) { clearInterval(micTimer); micTimer = null; }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  micAnalyser = null;
+  $("micBtn").classList.remove("on");
+  $("micBtn").textContent = "🎙️ use as calibration mic";
+  setMicStatus("");
+  send({ type: "micMode", on: false });
+}
+
+function setMicStatus(text) {
+  const el = $("micStatus");
+  el.textContent = text;
+  el.style.display = text ? "block" : "none";
 }
 
 // --- mesh: client<->client ping channels (the "sync truth matrix") -----------

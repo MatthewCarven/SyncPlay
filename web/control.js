@@ -20,6 +20,10 @@ function connect() {
     if (msg.type === "snapshot") { snap = msg; snapAtPerf = performance.now(); render(); }
     else if (msg.type === "toast") toast(msg.text);
     else if (msg.type === "spectrum") specLatest.set(msg.nodeId, { bands: msg.bands, at: performance.now() });
+    else if (msg.type === "micLevel") {
+      micLevels.set(msg.nodeId, { rms: msg.rms, at: performance.now() });
+      if (snap) renderCalibration();   // faster than the 1 Hz snapshot: lively meter
+    }
   };
   ws.onclose = () => {
     $("connState").textContent = "· reconnecting…";
@@ -79,6 +83,7 @@ function render() {
 
   renderSpectrumWidgets();
   renderEqWidgets();
+  renderCalibration();
   renderMesh();
   renderPlaylist();
   renderNowLine();
@@ -296,6 +301,45 @@ function buildEqRow(panel, id) {
 function pushEq(id) {
   const w = eqRows.get(id);
   if (w) cmd({ cmd: "eq", nodeId: id, eqDb: w.sliders.map((s) => parseFloat(s.value) || 0) });
+}
+
+// --- calibration mic level ---------------------------------------------------
+// One live input meter per node that opted in as a calibration mic. Phase 1
+// proof that the mic hears the room; the auto-nudge DSP comes next. Display-only.
+const micLevels = new Map();  // nodeId -> {rms, at}
+const calRows = new Map();    // nodeId -> {row, name, fill, db}
+
+function renderCalibration() {
+  const panel = $("calPanel");
+  if (!panel) return;
+  const mics = snap.nodes.filter((n) => n.connected && n.mic);
+  const want = new Set(mics.map((n) => n.id));
+
+  for (const [id, w] of calRows) {
+    if (!want.has(id)) { w.row.remove(); calRows.delete(id); micLevels.delete(id); }
+  }
+  for (const n of mics) {
+    let w = calRows.get(n.id);
+    if (!w) {
+      const row = document.createElement("div"); row.className = "calRow";
+      const name = document.createElement("div"); name.className = "calName";
+      const meter = document.createElement("div"); meter.className = "calMeter";
+      const fill = document.createElement("div"); fill.className = "calFill";
+      meter.appendChild(fill);
+      const db = document.createElement("div"); db.className = "calDb"; db.textContent = "—";
+      row.append(name, meter, db);
+      panel.appendChild(row);
+      w = { row, name, fill, db }; calRows.set(n.id, w);
+    }
+    w.name.textContent = "🎙️ " + n.name;
+    const lv = micLevels.get(n.id);
+    const fresh = lv && (performance.now() - lv.at) < 1000;
+    const dbfs = (fresh && lv.rms > 1e-6) ? 20 * Math.log10(lv.rms) : -120;
+    const pct = Math.max(0, Math.min(100, (dbfs + 60) / 60 * 100));  // map -60..0 dB
+    w.fill.style.width = pct + "%";
+    w.db.textContent = !fresh ? "—" : (dbfs > -99 ? dbfs.toFixed(0) + " dB" : "quiet");
+  }
+  $("calEmpty").style.display = mics.length ? "none" : "block";
 }
 
 // --- helpers (also used from inline handlers) --------------------------------------

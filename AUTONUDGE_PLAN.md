@@ -76,8 +76,10 @@ first, flip HTTPS on for the fleet.
 
 ## Suggested commit ladder (small, testable)
 
-1. Mic-capture plumbing + "calibrate" button that records and reports RMS — proves
-   getUserMedia + capture on a device.
+1. **[DONE 2026-07-18]** Mic-capture plumbing + "use as calibration mic" button +
+   RMS level meter on control. Verified sans real mic (graceful getUserMedia fail;
+   full micMode/micLevel relay + meter math). Real-capture + HTTPS test pending on
+   hardware.
 2. Emit sweep on one node + cross-correlate on the mic-node → report ToF for that
    one speaker — proves the measurement.
 3. Sequence all nodes; compute relative nudges; show proposed values on control.

@@ -100,6 +100,7 @@ class Node:
         self.connected = False
         self.ua = ""
         self.mesh = False  # page supports client<->client ping channels
+        self.mic = False  # opted in as a calibration microphone this page-life
         self.ping_seq = 0
         self.pending: Dict[int, float] = {}  # ping id -> t0
         self.loaded: Set[str] = set()  # track ids decoded and ready this page-life
@@ -121,6 +122,7 @@ class Node:
         self.sync_err_ms = None
         self.play_rate = None
         self.burst_until = 0.0
+        self.mic = False  # mic mode is per page-life; the client re-announces it
 
     def end_session(self) -> None:
         self.connected = False
@@ -147,6 +149,7 @@ class Node:
             "nudgeMs": self.nudge_ms,
             "volume": self.volume,
             "eqDb": self.eq_db,
+            "mic": self.mic,
             "syncErrMs": self.sync_err_ms,
             "ratePpm": (self.play_rate - 1.0) * 1e6 if self.play_rate else None,
             "playing": self.playing_track,
@@ -802,6 +805,22 @@ class Conductor:
                     return
                 await self._broadcast_control(
                     {"type": "spectrum", "nodeId": node.client_id, "bands": clean}
+                )
+        elif kind == "micMode":
+            # This device opted in / out as a calibration microphone.
+            node.mic = bool(data.get("on"))
+            await self.push_state()
+        elif kind == "micLevel":
+            # Live input RMS from a calibration mic, relayed to control. Also
+            # self-heals mic state after a reconnect (a level implies mic on).
+            node.mic = True
+            if self.control_sockets:
+                try:
+                    rms = float(data.get("rms"))
+                except (TypeError, ValueError):
+                    return
+                await self._broadcast_control(
+                    {"type": "micLevel", "nodeId": node.client_id, "rms": rms}
                 )
 
     async def handle_control_ws(self, request: web.Request) -> web.WebSocketResponse:
