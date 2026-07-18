@@ -65,6 +65,9 @@ flam — then play something.
   latency: if one device sounds late, give it a negative nudge. Per-node
   **volume** is also pushable from the control page. Both persist in
   `syncplay_state.json`.
+- The control page also shows a live **spectrum** per node — a graphic-EQ meter
+  tapped from each node's own audio output (an internal signal tap, not a mic),
+  handy for eyeballing at a glance that every device is actually playing.
 
 ## Notes & limits (v1)
 

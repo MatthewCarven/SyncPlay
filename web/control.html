@@ -51,6 +51,19 @@
   }
   .miniFill { height: 100%; background: var(--accent); }
   .miniTime { color: var(--dim); font-size: .68rem; margin-left: 6px; }
+  /* spectrum */
+  #spectrumPanel { display: flex; flex-direction: column; gap: 12px; }
+  .specRow { display: flex; align-items: center; gap: 12px; }
+  .specName {
+    flex: none; width: 116px; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .specBars { flex: 1; display: flex; align-items: flex-end; gap: 2px; height: 46px; }
+  .specBar {
+    flex: 1; min-width: 2px; height: 100%; background: var(--accent);
+    border-radius: 1px; transform: scaleY(0.02); transform-origin: bottom;
+  }
+  .specRow.idle .specBar { background: var(--edge); }
   td.closureOk { color: var(--accent); }
   td.closureWarn { color: var(--warn); }
   td.closureBad { color: var(--bad); }
@@ -97,6 +110,12 @@
       <tbody id="nodeRows"></tbody>
     </table>
     <div class="empty" id="nodesEmpty">no nodes yet — open <b id="playerUrl"></b> on each device and tap JOIN</div>
+  </div>
+
+  <h2>SPECTRUM <span class="pill">live output level per node — an internal tap, not a mic</span></h2>
+  <div class="card">
+    <div id="spectrumPanel"></div>
+    <div class="empty" id="spectrumEmpty">no nodes yet</div>
   </div>
 
   <h2>MESH TRUTH <span class="pill">node↔node measured vs star-implied — the mismatch is your real sync error</span></h2>

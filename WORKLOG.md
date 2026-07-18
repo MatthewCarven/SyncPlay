@@ -1,5 +1,35 @@
 # SyncPlay worklog
 
+## 2026-07-18 — per-node spectrum ("equalizer") on the control page
+
+Matthew's idea: get audio *back* from the fleet and offer an equalizer. Scoped
+it to the cheapest, safest slice that still lands the visual — a live per-node
+spectrum on the control page fed by an **internal WebAudio tap, not mics**. No
+HTTPS, no WebRTC audio, no new transport, and zero lines of timing code touched.
+(Deferred, in order: output-shaping EQ pushed to nodes; then the mic/acoustic
+path — which needs the parked HTTPS story first — unlocking room correction +
+auto-nudge.)
+
+Data path reuses the whole existing star. Each node hangs an AnalyserNode off
+its `master` gain (the one bus every source *and* the beep flow through — a
+read-only sink: no latency, invisible to the servo, which reads position off
+`current.*` upstream of master), folds 128 FFT bins into 28 log-spaced bands,
+and ships them ~12.5 fps over its player WebSocket *only while playing*. The
+conductor relays each frame straight to any open control page (new
+`_broadcast_control` helper, which also DRYs `push_state`/`toast`). Control
+keeps one bar-row per connected node and eases the bars with attack/gravity so
+the ~12 fps feed looks fluid. One additive commit; `git revert` is the exit.
+
+Verified on the alt conductor (8931, isolated from the live 8927 fleet Matthew
+was running) with two `?id=` dev nodes playing "02 - Out Of Time": frames
+arriving from *both* nodes, 28 bands, fresh (age 11–73 ms), a real bass-heavy
+shape (bars pinned at 1.0 in the low end, tapering to the 0.02 floor up top),
+the two nodes reading independently. Crucially the **servo held sub-ms right
+through it — err 0.3 / 0.8 ms** — proof the tap doesn't perturb timing. 12/12
+tests green; no console or server errors. (The sandbox's screenshot tool was
+wedged — timed out even on the static node page — so verified by DOM/data
+inspection instead, which is the stronger proof anyway.)
+
 ## 2026-07-17 — v3: sync truth matrix (client↔client pings)
 
 Matthew picked the mesh idea off the backlog. Design: WebRTC DataChannels

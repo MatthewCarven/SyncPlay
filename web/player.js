@@ -39,6 +39,7 @@ let joined = false;
 let nudgeMs = 0;
 let reconnectDelay = 1000;
 let wakeLock = null;
+let analyser = null;     // taps master to feed the control-page spectrum
 
 const cache = new Map(); // trackId -> AudioBuffer (capped at 2)
 const loading = new Set();
@@ -74,6 +75,17 @@ $("joinBtn").addEventListener("click", async () => {
   master = ctx.createGain();
   master.gain.value = $("vol").value / 100;
   master.connect(ctx.destination);
+
+  // Passive tap for the control-page spectrum. master is the one bus every
+  // source (and the beep) flows through, so a single AnalyserNode hung off it
+  // sees all output. It's a read-only sink: nothing reaches it *instead* of the
+  // speakers, it adds no latency, and it's invisible to the servo (which reads
+  // position off current.*, upstream of master). Feeds the spectrum tap below.
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;                // -> 128 frequency bins
+  analyser.smoothingTimeConstant = 0.6;
+  master.connect(analyser);
+  startSpectrum();
 
   joined = true;
   $("joinView").style.display = "none";
@@ -315,6 +327,42 @@ function onBeep(msg) {
   osc.connect(g).connect(master);
   osc.start(when);
   osc.stop(when + 0.15);
+}
+
+// --- spectrum tap: a cheap level meter for the control page -------------------
+// Fully outside the audio path and purely cosmetic: a dozen times a second,
+// while something is playing, read the analyser and ship compact byte bands to
+// the conductor, which relays them to any open control page. Bands are
+// log-spaced because musical energy bunches in the low end — linear FFT bins
+// would leave the top half of the meter permanently dead.
+const SPECTRUM_BANDS = 28;
+const SPECTRUM_MS = 80;                   // ~12.5 fps; the UI eases it smooth
+let specBins = null;                      // reused Uint8Array over the FFT bins
+let specEdges = null;                     // geometric band boundaries, once
+
+function startSpectrum() {
+  specBins = new Uint8Array(analyser.frequencyBinCount);
+  // Band k spans bins [edges[k], edges[k+1]); geometric from bin 1 (skip DC)
+  // to the top, so each band is ~a constant musical interval wide.
+  specEdges = new Array(SPECTRUM_BANDS + 1);
+  const lo = 1, hi = analyser.frequencyBinCount;
+  for (let k = 0; k <= SPECTRUM_BANDS; k++)
+    specEdges[k] = Math.round(lo * Math.pow(hi / lo, k / SPECTRUM_BANDS));
+  setInterval(sampleSpectrum, SPECTRUM_MS);
+}
+
+function sampleSpectrum() {
+  if (!current || !analyser || ctx.state !== "running") return;
+  analyser.getByteFrequencyData(specBins);
+  const bands = new Array(SPECTRUM_BANDS);
+  for (let k = 0; k < SPECTRUM_BANDS; k++) {
+    let peak = 0;
+    const end = Math.max(specEdges[k] + 1, specEdges[k + 1]); // >=1 bin per band
+    for (let i = specEdges[k]; i < end && i < specBins.length; i++)
+      if (specBins[i] > peak) peak = specBins[i];
+    bands[k] = peak;
+  }
+  send({ type: "spectrum", bands });
 }
 
 // --- mesh: client<->client ping channels (the "sync truth matrix") -----------

@@ -6,6 +6,12 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] Per-node spectrum "equalizer" on the control page (2026-07-18) —
+  AnalyserNode tapped off each node's `master` bus, 28 log-spaced bands relayed
+  over the existing WebSocket (`_broadcast_control`), animated bar-rows on
+  control. Additive, servo untouched (err held 0.3–0.8 ms during a live play).
+  Shows the *digital* signal each node plays; the acoustic/mic version waits on
+  HTTPS.
 - [x] Read-only per-node position bar on the control page (2026-07-17) —
   ideal timeline + each node's reported err ms; zero server changes.
 - [x] Client↔client "sync truth matrix" (2026-07-17) — WebRTC DataChannel
@@ -16,6 +22,14 @@ the player audio path only when unavoidable, one commit per feature so
   are extinct (found the hard way when a cached page lacked the mesh code).
 
 ## Next candidates
+
+- [ ] **Per-node output EQ — push a graphic EQ from control to each node**
+  - The natural sequel to the spectrum meter: see them, then shape them. Insert
+    a BiquadFilter chain between each source and `master`; control sends band
+    gains, persisted like nudge/volume. Servo-safe (filters don't move playback
+    position) but it *does* touch the node audio path → its own commit + a
+    bypass toggle. After this, the mic/acoustic path (needs HTTPS) unlocks the
+    measure-then-correct loop already sketched under Later/maybe.
 
 - [ ] **Party mode — any node can submit a file to the playlist**
   - `POST /upload` on the conductor (size cap ~100 MB, audio-extension

@@ -340,24 +340,25 @@ class Conductor:
             )
         return out
 
-    async def push_state(self) -> None:
+    async def _broadcast_control(self, payload: dict) -> None:
+        """Fan one JSON message out to every open control page, dropping dead ones."""
         if not self.control_sockets:
             return
-        msg = json.dumps(self.snapshot())
+        msg = json.dumps(payload)
         for ws in list(self.control_sockets):
             try:
                 await ws.send_str(msg)
             except (ConnectionError, RuntimeError):
                 self.control_sockets.discard(ws)
 
+    async def push_state(self) -> None:
+        if not self.control_sockets:
+            return  # skip building the snapshot when nobody's watching
+        await self._broadcast_control(self.snapshot())
+
     async def toast(self, text: str) -> None:
         log.info("toast: %s", text)
-        msg = json.dumps({"type": "toast", "text": text})
-        for ws in list(self.control_sockets):
-            try:
-                await ws.send_str(msg)
-            except (ConnectionError, RuntimeError):
-                self.control_sockets.discard(ws)
+        await self._broadcast_control({"type": "toast", "text": text})
 
     # --- ping cadence -----------------------------------------------------------
 
@@ -770,6 +771,18 @@ class Conductor:
             if node.playing_track is None:
                 node.sync_err_ms = None
                 node.play_rate = None
+        elif kind == "spectrum":
+            # Cosmetic per-node level meter, relayed straight to any open control
+            # page — never stored, never touches timing. Clamp hard: client data.
+            bands = data.get("bands")
+            if self.control_sockets and isinstance(bands, list) and bands:
+                try:
+                    clean = [max(0, min(255, int(b))) for b in bands[:64]]
+                except (TypeError, ValueError):
+                    return
+                await self._broadcast_control(
+                    {"type": "spectrum", "nodeId": node.client_id, "bands": clean}
+                )
 
     async def handle_control_ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20.0)

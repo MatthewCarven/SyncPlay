@@ -19,6 +19,7 @@ function connect() {
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     if (msg.type === "snapshot") { snap = msg; snapAtPerf = performance.now(); render(); }
     else if (msg.type === "toast") toast(msg.text);
+    else if (msg.type === "spectrum") specLatest.set(msg.nodeId, { bands: msg.bands, at: performance.now() });
   };
   ws.onclose = () => {
     $("connState").textContent = "· reconnecting…";
@@ -76,6 +77,7 @@ function render() {
   const editing = active && active.closest && active.closest("#nodeRows");
   if (!editing) renderNodeTable();
 
+  renderSpectrumWidgets();
   renderMesh();
   renderPlaylist();
   renderNowLine();
@@ -157,6 +159,69 @@ function renderNowLine() {
   }
 }
 setInterval(renderNowLine, 500);
+
+// --- spectrum ("equalizer") --------------------------------------------------
+// Nodes tap their own WebAudio output and stream compact byte bands here (via
+// the conductor relay). Keep one bar-row per connected node; ease the bars with
+// classic meter gravity so a ~12 fps feed still looks fluid. Display-only —
+// nothing here can touch playback or timing.
+const SPEC_BARS = 28;
+const specLatest = new Map();  // nodeId -> {bands:[...], at: perfMs}
+const specRows = new Map();    // nodeId -> {row, name, bars:[el], shown:[num]}
+let specLastFrame = 0;
+
+function renderSpectrumWidgets() {
+  const panel = $("spectrumPanel");
+  if (!panel) return;
+  const nodes = snap.nodes.filter((n) => n.connected);
+  const want = new Set(nodes.map((n) => n.id));
+
+  for (const [id, w] of specRows) {
+    if (!want.has(id)) { w.row.remove(); specRows.delete(id); specLatest.delete(id); }
+  }
+  for (const n of nodes) {
+    let w = specRows.get(n.id);
+    if (!w) {
+      const row = document.createElement("div");
+      row.className = "specRow idle";
+      const name = document.createElement("div");
+      name.className = "specName";
+      const barsEl = document.createElement("div");
+      barsEl.className = "specBars";
+      const bars = [];
+      for (let i = 0; i < SPEC_BARS; i++) {
+        const b = document.createElement("div");
+        b.className = "specBar";
+        barsEl.appendChild(b);
+        bars.push(b);
+      }
+      row.append(name, barsEl);
+      panel.appendChild(row);
+      w = { row, name, bars, shown: new Array(SPEC_BARS).fill(0) };
+      specRows.set(n.id, w);
+    }
+    w.name.textContent = n.name;
+  }
+  $("spectrumEmpty").style.display = nodes.length ? "none" : "block";
+}
+
+function animateSpectrum(now) {
+  const dt = specLastFrame ? Math.min(0.1, (now - specLastFrame) / 1000) : 0;
+  specLastFrame = now;
+  for (const [id, w] of specRows) {
+    const frame = specLatest.get(id);
+    const fresh = frame && (now - frame.at) < 250;  // a couple missed frames = idle
+    for (let i = 0; i < SPEC_BARS; i++) {
+      const target = fresh ? (frame.bands[i] || 0) / 255 : 0;  // 0..1
+      // Attack instantly, release under gravity — the classic meter feel.
+      w.shown[i] = target > w.shown[i] ? target : Math.max(target, w.shown[i] - dt * 1.8);
+      w.bars[i].style.transform = `scaleY(${Math.max(0.02, w.shown[i]).toFixed(3)})`;
+    }
+    w.row.classList.toggle("idle", !fresh);
+  }
+  requestAnimationFrame(animateSpectrum);
+}
+requestAnimationFrame(animateSpectrum);
 
 // --- helpers (also used from inline handlers) --------------------------------------
 function posCellFor(n) {
