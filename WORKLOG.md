@@ -30,6 +30,17 @@ tests green; no console or server errors. (The sandbox's screenshot tool was
 wedged — timed out even on the static node page — so verified by DOM/data
 inspection instead, which is the stronger proof anyway.)
 
+**Real-fleet confirmation (same day):** Matthew restarted the live conductor,
+reloaded the pages, and the spectrum lit up on all three real nodes at once
+(phone, pc, Laptop1) mid-"Out Of Time" — each row its own independent spectral
+shape, mesh closures still sub-ms green (−0.10 / 0.34 / 0.72). One caveat worth
+logging: Laptop1 read err 46.9 ms vs ~1 ms on the others — not a sync-quality
+issue (its clock is the best in the fleet: rtt 0.3, drift −0.5), just the servo
+still slewing out the offset left by its reload catchup. 46.9 ms exceeds what
+the ±800 ppm cap can null inside the 15 s horizon, so it rate-limits to
+~0.8 ms/s (≈a minute to zero); a pause→resume re-anchors all three instantly.
+Matthew: "cannot overstate the awesome."
+
 ## 2026-07-17 — v3: sync truth matrix (client↔client pings)
 
 Matthew picked the mesh idea off the backlog. Design: WebRTC DataChannels
