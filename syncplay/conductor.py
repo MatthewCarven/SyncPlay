@@ -618,7 +618,7 @@ class Conductor:
         self._measure_pending = {
             "seq": seq, "spk": spk.client_id, "mic": mic.client_id, "t_emit": t_emit,
         }
-        await mic.send({"type": "measureArm", "seq": seq, "windowMs": 550})
+        await mic.send({"type": "measureArm", "seq": seq, "windowMs": 900})
         await spk.send({"type": "measureEmit", "seq": seq,
                         "atNodeMs": est_s.to_node_time(t_emit) * 1000.0})
         await self.toast(f"Measuring {spk.name} -> {mic.name}...")

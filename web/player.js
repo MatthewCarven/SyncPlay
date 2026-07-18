@@ -491,7 +491,11 @@ function setMicStatus(text) {
 // The correlation peak is the direct-sound arrival — with the synced emit time,
 // that's time-of-flight. Short chirp + short window keeps xcorr cheap enough to
 // run in the time domain (no FFT). The chirp bypasses EQ + volume (fixed level).
-const CHIRP_F0 = 1000, CHIRP_F1 = 8000, CHIRP_S = 0.04;   // 1–8 kHz sweep, 40 ms
+const CHIRP_F0 = 500, CHIRP_F1 = 6000, CHIRP_S = 0.25;    // 0.5–6 kHz sweep, 250 ms
+// A long, wide sweep is (a) unmistakably audible — a clear "whoop", not a blip —
+// and (b) far higher matched-filter gain, so the correlation peak stands well
+// clear of room noise. The swept phase keeps the autocorrelation sharp (good
+// time resolution) regardless of length.
 
 function makeChirpArray(sampleRate) {
   const n = Math.max(1, Math.round(CHIRP_S * sampleRate));
@@ -518,7 +522,7 @@ function onMeasureEmit(msg) {
   const src = ctx.createBufferSource();
   src.buffer = buf;
   const g = ctx.createGain();
-  g.gain.value = 0.4;
+  g.gain.value = 0.6;
   src.connect(g).connect(ctx.destination);
   src.start(when);
 }
