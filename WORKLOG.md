@@ -1,5 +1,40 @@
 # SyncPlay worklog
 
+## 2026-07-21 — per-node download % in the control pill
+
+When you hit play on a track no node has cached yet, the file has to stream from
+the conductor before the load gate opens — and the control page showed nothing
+but a stale "idle" for that whole wait. Now each node reports its byte-download
+progress and the control page shows it in the node's status pill:
+`idle → ⬇ 47% → ready → ♪ playing`.
+
+The key design call was *where* the number lives. It's tempting to hang it on the
+playlist row, but a track is pulled by N nodes at N different speeds — one row,
+no single %. A download is a **per-node** thing, so it belongs on the node row,
+where each row has exactly one current fetch: nothing to select, the row *is* the
+selector. `player.js` swaps the one-shot `resp.arrayBuffer()` for a
+`resp.body.getReader()` loop that counts bytes against `Content-Length` and sends
+`loadProgress {trackId, pct}` (throttled ~every 2%), then reassembles the chunks
+and decodes exactly as before — falls back to a plain read if the length or
+ReadableStream is missing. The conductor stashes `load_pct`/`load_track` per node
+and exposes `loadPct` in the snapshot (non-null only while a not-yet-decoded track
+is streaming; cleared on `loaded`). Control renders it in the pill, masked by
+`♪ playing`. Fully outside the audio path — rides the 1 Hz snapshot, never pushes,
+zero effect on decode, scheduling, or the servo.
+
+Verified hard over `:8931` with the 59.6 MB Tubular Bells: the live control pill
+walked `idle → ⬇ 99% → ready → ♪ playing`, the server logged the duration + play
+with **no `loadError`** (so the streamed-and-reassembled bytes decode fine and
+playback is intact), and an instrumented run of the progress loop against the same
+file emitted a clean throttled climb — `0, 2, 5, 7 … 96, 98, 100` (38 steps).
+`Content-Length` is already present on the `FileResponse`, so the % needed no
+server-side change to get its denominator.
+
+Deferred (the obvious next slice if it feels chunky): a targeted live relay like
+`micLevel`, so the pill ticks up faster than the 1 Hz snapshot. Snapshot-only was
+chosen first because a fast LAN pull *should* just flip to "ready" — the % is for
+the slow case, which is exactly where 1 Hz is plenty.
+
 ## 2026-07-18 (later, iv) — chirp time-of-flight measurement (auto-nudge step 2)
 
 The measurement engine from [AUTONUDGE_PLAN.md](AUTONUDGE_PLAN.md) step 2: a

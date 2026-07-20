@@ -104,6 +104,8 @@ class Node:
         self.ping_seq = 0
         self.pending: Dict[int, float] = {}  # ping id -> t0
         self.loaded: Set[str] = set()  # track ids decoded and ready this page-life
+        self.load_track: Optional[str] = None  # track id currently downloading (pre-decode)
+        self.load_pct: Optional[int] = None  # its byte-download %, for the control pill
         self.playing_track: Optional[str] = None  # as reported by the node
         self.sync_err_ms: Optional[float] = None  # last steer error it reported
         self.play_rate: Optional[float] = None  # its current servo playback rate
@@ -118,6 +120,8 @@ class Node:
         self.model = ClockModel()
         self.pending.clear()
         self.loaded.clear()
+        self.load_track = None
+        self.load_pct = None
         self.playing_track = None
         self.sync_err_ms = None
         self.play_rate = None
@@ -154,6 +158,13 @@ class Node:
             "ratePpm": (self.play_rate - 1.0) * 1e6 if self.play_rate else None,
             "playing": self.playing_track,
             "loadedCurrent": bool(current_track and current_track in self.loaded),
+            # Non-null only while a not-yet-decoded track is streaming in — the
+            # control page shows it in the node's status pill. Cleared on decode.
+            "loadPct": (
+                self.load_pct
+                if (self.load_track is not None and self.load_track not in self.loaded)
+                else None
+            ),
             "offsetMs": None,
             "lastRttMs": None,
             "bestRttMs": None,
@@ -778,9 +789,23 @@ class Conductor:
             if len(node.pending) > 64:  # drop pings the node never answered
                 cutoff = now() - PENDING_PING_TTL
                 node.pending = {k: v for k, v in node.pending.items() if v > cutoff}
+        elif kind == "loadProgress":
+            # Byte-download progress for a track this node is pulling from us.
+            # Stored for the next snapshot rather than pushed: display-only, never
+            # touches timing, and a fast LAN pull just flips straight to "ready".
+            tid = str(data.get("trackId"))
+            try:
+                pct = int(data.get("pct"))
+            except (TypeError, ValueError):
+                return
+            node.load_track = tid
+            node.load_pct = max(0, min(100, pct))
         elif kind == "loaded":
             tid = str(data.get("trackId"))
             node.loaded.add(tid)
+            if node.load_track == tid:  # decode done: retire the progress pill
+                node.load_track = None
+                node.load_pct = None
             track = self.tracks_by_id.get(tid)
             if track is not None and track.duration_ms is None:
                 try:

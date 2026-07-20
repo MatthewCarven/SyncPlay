@@ -225,7 +225,7 @@ async function loadTrack(trackId, url) {
   try {
     const resp = await fetch(url || `/tracks/${trackId}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const buf = await ctx.decodeAudioData(await resp.arrayBuffer());
+    const buf = await ctx.decodeAudioData(await fetchWithProgress(resp, trackId));
     cache.set(trackId, buf);
     // Decoded PCM is big (~85 MB per 4-min track): keep current + next only.
     for (const key of cache.keys()) {
@@ -240,6 +240,32 @@ async function loadTrack(trackId, url) {
   } finally {
     loading.delete(trackId);
   }
+}
+
+// Stream the response body so we can report byte-download progress to the
+// control page while a track pulls from the server, then hand the reassembled
+// bytes to decodeAudioData. Purely cosmetic and fully outside the audio path:
+// with no Content-Length (or no ReadableStream) we fall back to a plain read
+// and the percentage simply never shows. Throttled to ~every 2% so even a
+// 60 MB file can't flood the socket.
+async function fetchWithProgress(resp, trackId) {
+  const total = +resp.headers.get("Content-Length") || 0;
+  if (!total || !resp.body || !resp.body.getReader) return resp.arrayBuffer();
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let received = 0, lastPct = -2;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    const pct = Math.min(100, Math.floor((100 * received) / total));
+    if (pct >= lastPct + 2) { lastPct = pct; send({ type: "loadProgress", trackId, pct }); }
+  }
+  const bytes = new Uint8Array(received);      // reassemble for decodeAudioData
+  let o = 0;
+  for (const c of chunks) { bytes.set(c, o); o += c.length; }
+  return bytes.buffer;
 }
 
 // --- playback -------------------------------------------------------------------

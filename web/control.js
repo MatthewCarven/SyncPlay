@@ -109,7 +109,10 @@ function renderMesh() {
 
 function renderNodeTable() {
   const rows = snap.nodes.map((n) => {
-    const state = n.playing ? "♪ playing" : (n.loadedCurrent ? "ready" : (n.connected ? "idle" : "gone"));
+    const dl = n.loadPct !== null && n.loadPct !== undefined;  // mid-download
+    const state = n.playing ? "♪ playing"
+                : dl ? `⬇ ${n.loadPct}%`
+                : (n.loadedCurrent ? "ready" : (n.connected ? "idle" : "gone"));
     const err = n.playing ? fmt(n.syncErrMs, 1) : "—";
     const ratePpm = (n.ratePpm === null || n.ratePpm === undefined)
       ? "" : ` title="servo rate: ${n.ratePpm >= 0 ? "+" : ""}${n.ratePpm.toFixed(0)} ppm"`;
