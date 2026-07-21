@@ -24,6 +24,7 @@ function connect() {
       micLevels.set(msg.nodeId, { rms: msg.rms, at: performance.now() });
       if (snap) renderCalibration();   // faster than the 1 Hz snapshot: lively meter
     }
+    else if (msg.type === "loadProgress") setNodePill(msg.nodeId, msg.pct, msg.done);
     else if (msg.type === "measureToF") showMeasure(msg);
   };
   ws.onclose = () => {
@@ -116,7 +117,7 @@ function renderNodeTable() {
     const err = n.playing ? fmt(n.syncErrMs, 1) : "—";
     const ratePpm = (n.ratePpm === null || n.ratePpm === undefined)
       ? "" : ` title="servo rate: ${n.ratePpm >= 0 ? "+" : ""}${n.ratePpm.toFixed(0)} ppm"`;
-    return `<tr>
+    return `<tr data-node="${esc(n.id)}">
       <td><span class="dot ${n.connected ? "ok" : ""}"></span>${esc(n.name)}</td>
       <td class="num">${fmt(n.offsetMs, 2)}</td>
       <td class="num">${fmt(n.bestRttMs, 1)}</td>
@@ -128,7 +129,7 @@ function renderNodeTable() {
             onchange="setNudge('${n.id}', this.value); this.blur()"></td>
       <td><input class="volSlider" type="range" min="0" max="100" value="${n.volume ?? 80}"
             onchange="setVol('${n.id}', this.value); this.blur()"></td>
-      <td class="pill">${state}</td>
+      <td class="pill nodeState">${state}</td>
     </tr>`;
   });
   $("nodeRows").innerHTML = rows.join("");
@@ -362,6 +363,23 @@ function posCellFor(n) {
   const pct = Math.min(100, 100 * pos / dur);
   return `<td><div class="miniBar"><div class="miniFill" style="width:${pct}%"></div></div>` +
          `<span class="miniTime">${mmss(pos)}</span></td>`;
+}
+
+// Live download-% pill, faster than the 1 Hz snapshot: paint the node's status
+// cell directly as progress relays in. The snapshot stays the source of truth for
+// idle/ready/playing and overwrites this on its next tick — we only ever write the
+// ⬇% and never mask a node that's already playing (its background prefetch of the
+// next track mustn't clobber "♪ playing"). `done` retires it the instant decode
+// finishes, so it doesn't linger at 99% until the next snapshot.
+function setNodePill(nodeId, pct, done) {
+  for (const row of document.querySelectorAll("#nodeRows tr")) {
+    if (row.dataset.node !== String(nodeId)) continue;
+    const cell = row.querySelector(".nodeState");
+    if (!cell || cell.textContent.trim() === "♪ playing") return;
+    if (done) { if (cell.textContent.trim().startsWith("⬇")) cell.textContent = "ready"; }
+    else cell.textContent = `⬇ ${pct}%`;
+    return;
+  }
 }
 
 window.playTrack = (trackId) => cmd({ cmd: "play", trackId });

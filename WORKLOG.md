@@ -35,6 +35,31 @@ Deferred (the obvious next slice if it feels chunky): a targeted live relay like
 chosen first because a fast LAN pull *should* just flip to "ready" — the % is for
 the slow case, which is exactly where 1 Hz is plenty.
 
+## 2026-07-21 (later) — make the download % live (relay + target-track gate)
+
+The snapshot-only version above lost to its own caveat in the field: a ~30 MB
+file on the real fleet downloads well inside one 1 Hz snapshot, so the pill just
+blinked `idle → playing` with nothing between — the middle was never sampled.
+Promoted it to a targeted live relay, exactly like `micLevel`/`spectrum`: the
+`loadProgress` handler now `_broadcast_control`s each step straight to the control
+page, and `control.js` paints the node's status cell directly (`setNodePill`, via
+a new `data-node` row attr + `nodeState` class) instead of waiting for the
+snapshot. The 1 Hz snapshot field stays as a fallback for a late-opening page; the
+relay just makes it tick. A `done` relay on `loaded` retires the ⬇% the instant
+decode finishes rather than lingering at 99%.
+
+Verifying it surfaced a real glitch, which the relay made visible: right after the
+current track loads, the conductor prefetches the *next* one, and that background
+download repainted the just-loaded node's pill (`⬇ 99% → ready → ⬇ 38% → playing`)
+before the "playing" snapshot landed. Fixed at the source with a `target_track`
+field (set at the top of `_transport_play`, cleared on stop): the relay only fires
+for the track we're actively bringing up, never the silent next-track prefetch.
+
+Re-verified over `:8931` with Tubular Bells: the pill now walks a live climb
+(`idle → ⬇13% → 40% → 84% → 99% → ready → ♪ playing`) with a clean tail — 16
+samples across the 0.8 s ready→playing window caught zero prefetch repaints — and
+the node ends `playing / loadedCurrent / loadPct=null`, no server errors.
+
 ## 2026-07-18 (later, iv) — chirp time-of-flight measurement (auto-nudge step 2)
 
 The measurement engine from [AUTONUDGE_PLAN.md](AUTONUDGE_PLAN.md) step 2: a

@@ -194,6 +194,7 @@ class Conductor:
         self.control_sockets: Set[web.WebSocketResponse] = set()
         self.playing: Optional[Playback] = None
         self.paused: Optional[Playback] = None  # t_start meaningless; seek_ms is the position
+        self.target_track: Optional[Track] = None  # track we're bringing up now (gates download-% relay)
         self._advance_task: Optional[asyncio.Task] = None
         self._transport_task: Optional[asyncio.Task] = None
         self._pulse_task: Optional[asyncio.Task] = None
@@ -460,6 +461,7 @@ class Conductor:
 
     async def _transport_play(self, track: Track, seek_ms: float = 0.0) -> None:
         self._cancel_advance()
+        self.target_track = track  # what the download-% pill is allowed to reflect
         self.paused = None
         if self.playing is not None:
             await self._broadcast_players({"type": "stop"})
@@ -580,6 +582,7 @@ class Conductor:
         self._cancel_advance()
         self.playing = None
         self.paused = None
+        self.target_track = None
         await self._broadcast_players({"type": "stop"})
         await self.push_state()
 
@@ -791,21 +794,37 @@ class Conductor:
                 node.pending = {k: v for k, v in node.pending.items() if v > cutoff}
         elif kind == "loadProgress":
             # Byte-download progress for a track this node is pulling from us.
-            # Stored for the next snapshot rather than pushed: display-only, never
-            # touches timing, and a fast LAN pull just flips straight to "ready".
+            # Relayed straight to control (like spectrum/micLevel) so the pill
+            # ticks up in real time — a 30 MB LAN pull finishes well inside one
+            # 1 Hz snapshot, so snapshot-only would just blink idle->ready. Also
+            # stashed on the node so a late-opening control page sees it too.
+            # Display-only, never touches timing.
             tid = str(data.get("trackId"))
+            # Only the track we're actively bringing up — never the silent
+            # prefetch of the *next* track, which would otherwise repaint a
+            # just-loaded node's pill before its "playing" snapshot lands.
+            if self.target_track is None or tid != self.target_track.id:
+                return
             try:
                 pct = int(data.get("pct"))
             except (TypeError, ValueError):
                 return
             node.load_track = tid
             node.load_pct = max(0, min(100, pct))
+            if self.control_sockets:
+                await self._broadcast_control(
+                    {"type": "loadProgress", "nodeId": node.client_id, "pct": node.load_pct}
+                )
         elif kind == "loaded":
             tid = str(data.get("trackId"))
             node.loaded.add(tid)
             if node.load_track == tid:  # decode done: retire the progress pill
                 node.load_track = None
                 node.load_pct = None
+                if self.control_sockets:  # flip the pill off ⬇% at once, not next snapshot
+                    await self._broadcast_control(
+                        {"type": "loadProgress", "nodeId": node.client_id, "done": True}
+                    )
             track = self.tracks_by_id.get(tid)
             if track is not None and track.duration_ms is None:
                 try:
