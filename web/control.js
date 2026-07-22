@@ -49,12 +49,25 @@ $("btnPlay").onclick = () => {
 };
 $("btnPause").onclick = () => cmd({ cmd: "pause" });
 $("btnResume").onclick = () => cmd({ cmd: "resume" });
+$("btnRestart").onclick = () => cmd({ cmd: "seek", positionMs: 0 });
 $("btnNext").onclick = () => cmd({ cmd: "next" });
 $("btnStop").onclick = () => cmd({ cmd: "stop" });
 $("btnBeep").onclick = () => cmd({ cmd: "beep" });
 $("btnResync").onclick = () => cmd({ cmd: "resync" });
 $("btnRescan").onclick = () => cmd({ cmd: "rescan" });
 $("measureBtn").onclick = () => cmd({ cmd: "measure" });
+
+// Click the position bar to seek: the whole fleet re-starts together at that
+// spot (same coordinated-start path as play/resume). Optimistically snap the fill
+// so it feels instant; the next snapshot confirms the real position.
+$("posHit").addEventListener("click", (e) => {
+  const cur = snap && (snap.playing || snap.paused);
+  if (!cur || !cur.durationMs) return;
+  const r = $("posBar").getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  cmd({ cmd: "seek", positionMs: frac * cur.durationMs });
+  $("posFill").style.width = (frac * 100).toFixed(1) + "%";
+});
 
 // --- rendering -------------------------------------------------------------------
 const fmt = (v, digits, dash = "—") =>

@@ -29,7 +29,8 @@
   button.primary { background: var(--accent); color: #04120a; font-weight: 700; border: 0; }
   #nowLine { flex: 1 1 100%; color: var(--dim); padding-top: 6px; }
   #nowLine b { color: var(--text); }
-  #posBar { height: 4px; background: var(--edge); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+  #posHit { flex: 1 1 100%; padding: 7px 0; cursor: pointer; }
+  #posBar { height: 8px; background: var(--edge); border-radius: 4px; overflow: hidden; }
   #posFill { height: 100%; width: 0; background: var(--accent); transition: width .3s linear; }
   /* tables */
   table { width: 100%; border-collapse: collapse; }
@@ -116,13 +117,14 @@
     <button class="primary" id="btnPlay">▶ play</button>
     <button id="btnPause">⏸ pause</button>
     <button id="btnResume">⏵ resume</button>
+    <button id="btnRestart" title="restart the current track from the top">⏮ restart</button>
     <button id="btnNext">⏭ next</button>
     <button id="btnStop">■ stop</button>
     <button id="btnBeep" title="every node beeps at the same instant — the sync smoke test">🔔 beep test</button>
     <button id="btnResync" title="dense ping burst on all nodes now">⇄ resync</button>
     <button id="btnRescan" title="rescan the music folder">↻ rescan</button>
     <div id="nowLine">nothing playing</div>
-    <div id="posBar"><div id="posFill"></div></div>
+    <div id="posHit" title="click to seek — the whole fleet jumps together"><div id="posBar"><div id="posFill"></div></div></div>
   </div>
 
   <h2>NODES</h2>

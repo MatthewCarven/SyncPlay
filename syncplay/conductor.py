@@ -967,6 +967,19 @@ class Conductor:
                 self.dispatch(
                     self._transport_play(self.paused.track, self.paused.seek_ms)
                 )
+        elif cmd == "seek":
+            # Jump the current track to an absolute position — a coordinated
+            # re-start of the whole fleet at the new offset, via the same synced
+            # path play/resume use (the track's already decoded everywhere, so the
+            # load gate clears instantly). dispatch() supersedes rapid re-seeks.
+            cur = self.playing or self.paused
+            if cur is not None and cur.track.duration_ms:
+                try:
+                    pos = float(data.get("positionMs", 0))
+                except (ValueError, TypeError):
+                    return
+                pos = max(0.0, min(pos, cur.track.duration_ms - 250.0))
+                self.dispatch(self._transport_play(cur.track, pos))
         elif cmd == "next":
             current = (self.playing or self.paused)
             base = current.track if current else (self.tracks[0] if self.tracks else None)

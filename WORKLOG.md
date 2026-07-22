@@ -1,5 +1,27 @@
 # SyncPlay worklog
 
+## 2026-07-22 — seek bar + ⏮ restart on the control page
+
+Matthew wanted to jump the currently-playing track back to the top (or anywhere)
+when a take goes wrong mid-song. It was nearly free: `_transport_play(track,
+seek_ms)` is already the seek primitive — the exact call `resume` uses — and the
+player already honors `seekMs` in a play command, so no `player.js` change and no
+new timing logic. Added a `seek` control command that re-plays the current track
+(`self.playing or self.paused`) at an absolute `positionMs`, clamped to
+`[0, duration-250ms]`, via that same synced path — the track's already decoded on
+every node so the load gate clears instantly, and `dispatch()` supersedes rapid
+re-seeks. On the control page the read-only position bar became click-to-seek
+(wrapped in a padded `#posHit` hit area, bar bumped 4→8 px, optimistic fill snap
+so it feels instant), plus a ⏮ restart button in the transport row for the no-aim
+"take it from the top" mash (just `seek → 0`).
+
+Each seek is a ~1.8 s *coordinated* re-start (the PLAY_LEAD everyone schedules
+against), not a live scrub — which is the whole point: the fleet stays locked.
+Verified over `:8931`: click-to-seek at 50 % landed `seekMs=105296` of 210814 with
+node sync **0.047 ms**; ⏮ restart landed `seekMs=0` at **−0.095 ms**; playback
+continued through both, no server errors. Sub-ms sync held right through the seeks
+because it's the same coordinated-start path as play/resume.
+
 ## 2026-07-21 — per-node download % in the control pill
 
 When you hit play on a track no node has cached yet, the file has to stream from
