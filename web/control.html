@@ -98,6 +98,13 @@
   td.closureBad { color: var(--bad); }
   tr.trackRow { cursor: default; }
   .playBtn { padding: 3px 10px; }
+  /* queue */
+  .qBtn { padding: 3px 9px; font-size: .72rem; }
+  .qPos { color: var(--dim); width: 26px; }
+  td.qTitle { white-space: normal; }
+  .nextUp { color: var(--accent); font-size: .68rem; letter-spacing: .08em; margin-left: 8px; }
+  #queueHead { display: flex; align-items: center; gap: 10px; }
+  tr.qNext td { color: var(--accent); }
   #toast {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
     background: var(--card); border: 1px solid var(--warn); color: var(--text);
@@ -174,6 +181,15 @@
       <tbody id="meshRows"></tbody>
     </table>
     <div class="empty" id="meshEmpty">needs ≥2 mesh-capable nodes (player pages loaded after this update)</div>
+  </div>
+
+  <h2 id="queueHead">
+    <span>QUEUE <span class="pill">plays before folder order — the head is what comes next</span></span>
+    <button id="btnQueueClear" class="qBtn" title="empty the queue; playback falls back to folder order">clear</button>
+  </h2>
+  <div class="card" style="overflow-x:auto">
+    <table><tbody id="queueRows"></tbody></table>
+    <div class="empty" id="queueEmpty">queue empty — hit <b>＋queue</b> on any track below to pick what plays next</div>
   </div>
 
   <h2>PLAYLIST</h2>

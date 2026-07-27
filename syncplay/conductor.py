@@ -39,6 +39,7 @@ PRE_END_BURST = 2.5       # heavy resync burst starts this long before track end
 GAP_AFTER_TRACK = 0.15    # silence after a track before the next is scheduled
 LOAD_GATE_TIMEOUT = 12.0  # max wait for nodes to report a track decoded
 PENDING_PING_TTL = 5.0
+MAX_QUEUE = 200           # sanity cap on the explicit play queue
 
 # --- ping cadence: (count, spacing_s) --------------------------------------
 BURST_JOIN = (16, 0.06)     # right after a node connects: converge fast
@@ -194,6 +195,11 @@ class Conductor:
         self.control_sockets: Set[web.WebSocketResponse] = set()
         self.playing: Optional[Playback] = None
         self.paused: Optional[Playback] = None  # t_start meaningless; seek_ms is the position
+        # Explicit play order layered over the folder scan. Track ids, duplicates
+        # allowed (queue the same song twice if you like), consumed from the head
+        # by auto-advance/next; when it empties we fall back to folder order.
+        # Deliberately not persisted: a queue is a mood, not a setting.
+        self.queue: List[str] = []
         self.target_track: Optional[Track] = None  # track we're bringing up now (gates download-% relay)
         self._advance_task: Optional[asyncio.Task] = None
         self._transport_task: Optional[asyncio.Task] = None
@@ -223,10 +229,12 @@ class Conductor:
                     )
         self.tracks = tracks
         self.tracks_by_id = {t.id: t for t in tracks}
+        # A rescan can retire files out from under the queue; forget those ids.
+        self.queue = [tid for tid in self.queue if tid in self.tracks_by_id]
         log.info("library: %d track(s) in %s", len(tracks), self.music_dir)
         return len(tracks)
 
-    def _next_track(self, current: Track) -> Optional[Track]:
+    def _folder_next(self, current: Track) -> Optional[Track]:
         if not self.tracks:
             return None
         try:
@@ -234,6 +242,59 @@ class Conductor:
         except StopIteration:
             return self.tracks[0]
         return self.tracks[(i + 1) % len(self.tracks)]
+
+    def _peek_next(self, current: Track) -> Optional[Track]:
+        """What plays after `current` — queue head if any, else folder order.
+
+        Non-consuming: this is what the prefetch and the control page's "next up"
+        marker ask, and asking must never change the answer.
+        """
+        for tid in self.queue:
+            t = self.tracks_by_id.get(tid)
+            if t is not None:
+                return t
+        return self._folder_next(current)
+
+    def _take_next(self, current: Track) -> Optional[Track]:
+        """Same choice as _peek_next, but consumes the queue entry it used.
+
+        Only the two places that genuinely move on to the next song call this:
+        auto-advance at end of track, and the control page's ⏭ next.
+        """
+        while self.queue:
+            tid = self.queue.pop(0)
+            t = self.tracks_by_id.get(tid)
+            if t is not None:
+                return t
+        return self._folder_next(current)
+
+    def _next_up_id(self) -> Optional[str]:
+        """Track id that would play next right now. Display only, never consumes."""
+        cur = self.playing or self.paused
+        if cur is not None:
+            nxt = self._peek_next(cur.track)
+            return nxt.id if nxt else None
+        for tid in self.queue:
+            if tid in self.tracks_by_id:
+                return tid
+        return self.tracks[0].id if self.tracks else None
+
+    def _take_next_idle(self) -> Optional[Track]:
+        """What ▶/⏭ start from a standstill: queue head, else the library top."""
+        while self.queue:
+            t = self.tracks_by_id.get(self.queue.pop(0))
+            if t is not None:
+                return t
+        return self.tracks[0] if self.tracks else None
+
+    async def _prefetch_next(self) -> None:
+        """Get whatever plays next decoding on every node, ahead of time."""
+        p = self.playing
+        if p is None:
+            return
+        nxt = self._peek_next(p.track)
+        if nxt and nxt.id != p.track.id:
+            await self._broadcast_players(self._preload_msg(nxt))
 
     # --- nudge persistence ----------------------------------------------------
 
@@ -339,6 +400,13 @@ class Conductor:
                 {"id": t.id, "title": t.title, "durationMs": t.duration_ms}
                 for t in self.tracks
             ],
+            "queue": [
+                {"id": t.id, "title": t.title, "durationMs": t.duration_ms}
+                for t in (self.tracks_by_id.get(q) for q in self.queue)
+                if t is not None
+            ],
+            # What actually plays next, queue or not — drives the "next up" marker.
+            "nextUp": self._next_up_id(),
             "musicDir": str(self.music_dir),
             "nodes": [n.stats(current) for n in self.nodes.values()],
             "mesh": self._mesh_snapshot(),
@@ -495,9 +563,7 @@ class Conductor:
         )
         self._advance_task = asyncio.create_task(self._auto_advance(self.playing))
         # Get the *next* track decoding everywhere while this one plays.
-        nxt = self._next_track(track)
-        if nxt and nxt.id != track.id:
-            await self._broadcast_players(self._preload_msg(nxt))
+        await self._prefetch_next()
         await self.push_state()
 
     async def _send_play(self, node: Node, p: Playback) -> bool:
@@ -552,7 +618,7 @@ class Conductor:
             await asyncio.sleep(delay)
         if self.playing is not p:
             return
-        nxt = self._next_track(p.track)
+        nxt = self._take_next(p.track)
         if nxt is None:
             self.playing = None
             await self.push_state()
@@ -957,7 +1023,13 @@ class Conductor:
     async def _on_control_cmd(self, data: dict) -> None:
         cmd = data.get("cmd")
         if cmd == "play":
-            track = self.tracks_by_id.get(str(data.get("trackId")))
+            # With a trackId: an explicit override — plays that track and leaves
+            # the queue intact for afterwards. Without one (▶ from a standstill):
+            # start the queue, consuming its head.
+            if data.get("trackId") is not None:
+                track = self.tracks_by_id.get(str(data.get("trackId")))
+            else:
+                track = self._take_next_idle()
             if track:
                 self.dispatch(self._transport_play(track))
         elif cmd == "pause":
@@ -982,11 +1054,13 @@ class Conductor:
                 self.dispatch(self._transport_play(cur.track, pos))
         elif cmd == "next":
             current = (self.playing or self.paused)
-            base = current.track if current else (self.tracks[0] if self.tracks else None)
-            if base is not None:
-                nxt = self._next_track(base) if current else base
-                if nxt:
-                    self.dispatch(self._transport_play(nxt))
+            if current is not None:
+                nxt = self._take_next(current.track)
+            else:
+                # Nothing playing: ⏭ starts the queue head, or the library top.
+                nxt = self._take_next_idle()
+            if nxt:
+                self.dispatch(self._transport_play(nxt))
         elif cmd == "stop":
             self.dispatch(self._transport_stop())
         elif cmd == "beep":
@@ -1026,9 +1100,48 @@ class Conductor:
                 await node.send({"type": "config", "nudgeMs": node.nudge_ms,
                                  "volume": node.volume, "eqDb": node.eq_db})
                 await self.push_state()
+        elif cmd == "queue":
+            # Append. Duplicates are allowed on purpose — queueing a song twice
+            # is a legitimate request, and index-based edits handle the ambiguity.
+            track = self.tracks_by_id.get(str(data.get("trackId")))
+            if track is not None and len(self.queue) < MAX_QUEUE:
+                self.queue.append(track.id)
+                await self.toast(f'Queued "{track.title}" (#{len(self.queue)}).')
+                await self._prefetch_next()
+                await self.push_state()
+            elif track is not None:
+                await self.toast(f"Queue is full ({MAX_QUEUE}).")
+        elif cmd in ("unqueue", "queueMove"):
+            # Both edit by index, not id: with duplicates allowed, position is
+            # the only unambiguous handle on a queue entry.
+            try:
+                i = int(data.get("index", -1))
+            except (ValueError, TypeError):
+                return
+            if not 0 <= i < len(self.queue):
+                return
+            if cmd == "unqueue":
+                self.queue.pop(i)
+            else:
+                try:
+                    j = i + int(data.get("delta", 0))
+                except (ValueError, TypeError):
+                    return
+                if not 0 <= j < len(self.queue) or i == j:
+                    return
+                self.queue[i], self.queue[j] = self.queue[j], self.queue[i]
+            await self._prefetch_next()
+            await self.push_state()
+        elif cmd == "queueClear":
+            if self.queue:
+                self.queue.clear()
+                await self.toast("Queue cleared - back to folder order.")
+                await self._prefetch_next()
+                await self.push_state()
         elif cmd == "rescan":
             n = self.scan_tracks()
             await self.toast(f"Rescanned: {n} track(s).")
+            await self._prefetch_next()
             await self.push_state()
 
     # --- http handlers -------------------------------------------------------------

@@ -6,6 +6,15 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] Play queue on the control page (2026-07-27) — conductor grows
+  `queue: [track ids]`; `_peek_next` (non-consuming, drives prefetch + the
+  "next up" marker) and `_take_next` (consuming, used only by auto-advance and
+  ⏭ next) split the one old `_next_track`. Empty queue = folder order, exactly
+  as before. Duplicates allowed, so edits address entries by **index**, not id.
+  Ephemeral by design (not in the state file); pruned on rescan. Explicit
+  `play {trackId}` is an override and leaves the queue alone; a bare `play`
+  from a standstill starts the queue head. This is the prerequisite commit the
+  party-mode item below asked for — the upload endpoint can now land on its own.
 - [x] Per-node output EQ pushed from control (2026-07-18) — 5-band biquad chain
   (80/250/1k/4k/12k Hz, ±12 dB) spliced `source -> eq -> master` on each node,
   vertical sliders per node on control, persisted in state like nudge/volume,
@@ -40,14 +49,14 @@ the player audio path only when unavoidable, one commit per feature so
     measures the distortion of the space and bends the signal to cancel it.
 
 - [ ] **Party mode — any node can submit a file to the playlist**
+  - ~~The queue this needed~~ is done (see Done, 2026-07-27) — auto-advance
+    already pops it, control already vetoes/reorders. What's left is the
+    submission path.
   - `POST /upload` on the conductor (size cap ~100 MB, audio-extension
     whitelist, sanitized filename) into `music/party/`, auto-rescan, toast
-    "X added by <node>" on control.
-  - The real design question: submissions want a **queue** (play order =
-    submission order) layered over today's folder-scan playlist. Conductor
-    grows a `queue: [track ids]`; auto-advance pops the queue first, falls
-    back to folder order when empty.
-  - Control page: veto/remove per queued item; maybe per-submitter cap.
+    "X added by <node>" on control, then auto-`queue` the new track id.
+  - Control page: per-submitter cap; a party-mode toggle that gates the whole
+    endpoint (off by default, so an idle conductor accepts no uploads).
   - Player page: an "add a song" file input, hidden behind a party-mode
     toggle on the control page.
   - Risk: touches auto-advance (real scheduling code) → do the queue as its

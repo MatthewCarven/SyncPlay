@@ -1,5 +1,58 @@
 # SyncPlay worklog
 
+## 2026-07-27 — play queue on the control page
+
+Matthew wanted a queue button to adjust what plays next. TODO.md had already
+designed this as the prerequisite commit for party mode, so it got built that
+way: full queue, control page only.
+
+The whole feature turns on splitting one old function. `_next_track()` was
+called from three places that meant two different things — the prefetch after a
+play (*"what's next, so I can decode it early"*) and the two real advances
+(auto-advance at end of track, ⏭ next). Same question, but only the latter
+should consume a queue entry. So it became `_peek_next()` (queue head if any,
+else the old folder-order walk, renamed `_folder_next`) and `_take_next()`
+(identical choice, pops what it used). Every remaining behaviour falls out of
+which one a call site picks. With an empty queue both collapse to exactly the
+old code path, which is why this can't regress folder playback.
+
+Decisions worth remembering:
+
+- **Duplicates are allowed**, so the control page addresses queue entries by
+  **index**, not track id — position is the only unambiguous handle when the
+  same song appears twice. `unqueue`/`queueMove` both validate the index (and
+  the destination) server-side and no-op on anything out of range.
+- **Not persisted.** Nudges/volumes/EQs live in `syncplay_state.json` because
+  they're calibration; a queue is a mood. It dies with the process, and it's
+  pruned on rescan so a deleted file can't sit in it as a ghost id.
+- **Explicit `play {trackId}` is an override** — it plays that track and leaves
+  the queue intact for afterwards. A *bare* `play` (what ▶ now sends from a
+  standstill) starts the queue head and consumes it. ⏭ next does the same.
+- Any queue mutation re-runs `_prefetch_next()`, so re-ordering mid-song
+  immediately gets the new next track decoding on every node rather than
+  waiting for the gap.
+
+Zero changes to `player.js`, the scheduler, or anything in the timing path —
+the queue only decides *which* Track gets handed to the unchanged
+`_transport_play()`.
+
+Verified: `tests/test_queue.py` (new, 17 cases) drives the control-command
+surface — add/dupe/move/remove/clear, malformed edits are no-ops, peek doesn't
+consume, next does, fallback to folder order when empty, explicit-play spares
+the queue, bare-play consumes it, rescan pruning — plus a regression guard that
+with an empty queue `_peek_next`/`_take_next` are exactly the old circular
+folder walk. 29 tests pass (12 pre-existing timesync + 17 new). Live over
+`:8931`: control page + JS serve, queue add/move/clear round-trip through the
+snapshot, and the server shrugs off malformed commands (bad ids, non-numeric
+index/delta, missing fields). Control rendering checked against a stub DOM:
+correct ▸/next-up markers, `queued×2` on the duplicated track, ↑/↓ disabled at
+the ends, empty-state copy, and HTML escaping intact.
+
+**Left for meatthread0:** the real-fleet click test — the queue is control-page
+logic and never touches audio, but worth watching a queued track actually take
+over at the gap with three nodes up. Nodes don't need to reload for this one
+(no player protocol change); the *control* page does.
+
 ## 2026-07-22 — seek bar + ⏮ restart on the control page
 
 Matthew wanted to jump the currently-playing track back to the top (or anywhere)

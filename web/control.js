@@ -44,8 +44,10 @@ function cmd(obj) {
 $("btnPlay").onclick = () => {
   if (!snap || !snap.tracks.length) return toast("no tracks in the library");
   const id = (snap.playing && snap.playing.trackId) ||
-             (snap.paused && snap.paused.trackId) || snap.tracks[0].id;
-  cmd({ cmd: "play", trackId: id });
+             (snap.paused && snap.paused.trackId);
+  // Resume/restart what's loaded; from a standstill send a bare play and let the
+  // conductor start the queue head (consuming it) or the library top.
+  cmd(id ? { cmd: "play", trackId: id } : { cmd: "play" });
 };
 $("btnPause").onclick = () => cmd({ cmd: "pause" });
 $("btnResume").onclick = () => cmd({ cmd: "resume" });
@@ -55,6 +57,7 @@ $("btnStop").onclick = () => cmd({ cmd: "stop" });
 $("btnBeep").onclick = () => cmd({ cmd: "beep" });
 $("btnResync").onclick = () => cmd({ cmd: "resync" });
 $("btnRescan").onclick = () => cmd({ cmd: "rescan" });
+$("btnQueueClear").onclick = () => cmd({ cmd: "queueClear" });
 $("measureBtn").onclick = () => cmd({ cmd: "measure" });
 
 // Click the position bar to seek: the whole fleet re-starts together at that
@@ -101,6 +104,7 @@ function render() {
   renderEqWidgets();
   renderCalibration();
   renderMesh();
+  renderQueue();
   renderPlaylist();
   renderNowLine();
 }
@@ -153,15 +157,51 @@ function renderPlaylist() {
 
   // playlist
   const nowId = snap.playing ? snap.playing.trackId : null;
-  $("trackRows").innerHTML = snap.tracks.map((t) => `
-    <tr class="trackRow">
-      <td>${t.id === nowId ? "♪ " : ""}${esc(t.title)}</td>
+  const queued = new Map();            // trackId -> how many times it's queued
+  for (const q of snap.queue || []) queued.set(q.id, (queued.get(q.id) || 0) + 1);
+  const nextUp = snap.nextUp || null;
+
+  $("trackRows").innerHTML = snap.tracks.map((t) => {
+    const n = queued.get(t.id) || 0;
+    const mark = t.id === nowId ? "♪ " : "";
+    // "next up" only earns the label when it isn't the one already playing.
+    const tag = (t.id === nextUp && t.id !== nowId)
+      ? ` <span class="nextUp">next up</span>` : "";
+    const qTag = n ? ` <span class="pill">· queued${n > 1 ? "×" + n : ""}</span>` : "";
+    return `<tr class="trackRow">
+      <td>${mark}${esc(t.title)}${tag}${qTag}</td>
       <td class="num">${t.durationMs ? mmss(t.durationMs) : ""}</td>
+      <td class="num"><button class="qBtn" title="add to the end of the queue"
+            onclick="queueTrack('${t.id}')">＋queue</button></td>
       <td class="num"><button class="playBtn" onclick="playTrack('${t.id}')">play</button></td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
   $("tracksEmpty").textContent = snap.tracks.length ? "" :
     `no audio files found in ${snap.musicDir} — drop some in and hit ↻ rescan`;
   $("tracksEmpty").style.display = snap.tracks.length ? "none" : "block";
+}
+
+// The queue: explicit play order layered over the folder scan. Edits address
+// entries by *index* (duplicates are allowed, so position is the only stable
+// handle) and every mutation is a plain command — the conductor re-broadcasts
+// the snapshot and this rebuilds. No optimistic local state to drift.
+function renderQueue() {
+  const q = snap.queue || [];
+  $("queueRows").innerHTML = q.map((t, i) => `
+    <tr class="${i === 0 ? "qNext" : ""}">
+      <td class="qPos num">${i + 1}</td>
+      <td class="qTitle">${i === 0 ? "▸ " : ""}${esc(t.title)}</td>
+      <td class="num">${t.durationMs ? mmss(t.durationMs) : ""}</td>
+      <td class="num">
+        <button class="qBtn" title="move up" ${i === 0 ? "disabled" : ""}
+          onclick="moveQueue(${i}, -1)">↑</button>
+        <button class="qBtn" title="move down" ${i === q.length - 1 ? "disabled" : ""}
+          onclick="moveQueue(${i}, 1)">↓</button>
+        <button class="qBtn" title="remove from queue" onclick="unqueue(${i})">✕</button>
+      </td>
+    </tr>`).join("");
+  $("queueEmpty").style.display = q.length ? "none" : "block";
+  $("btnQueueClear").style.display = q.length ? "" : "none";
 }
 
 function renderNowLine() {
@@ -396,6 +436,9 @@ function setNodePill(nodeId, pct, done) {
 }
 
 window.playTrack = (trackId) => cmd({ cmd: "play", trackId });
+window.queueTrack = (trackId) => cmd({ cmd: "queue", trackId });
+window.unqueue = (index) => cmd({ cmd: "unqueue", index });
+window.moveQueue = (index, delta) => cmd({ cmd: "queueMove", index, delta });
 window.setNudge = (nodeId, v) => cmd({ cmd: "nudge", nodeId, nudgeMs: parseFloat(v) || 0 });
 window.setVol = (nodeId, v) => cmd({ cmd: "volume", nodeId, volume: parseInt(v, 10) });
 
