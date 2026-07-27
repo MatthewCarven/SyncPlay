@@ -6,6 +6,13 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] Writable seek bar + ⏮ restart (2026-07-22) — `seek` control command
+  re-plays the current track at an absolute `positionMs` through the same
+  coordinated-start path as resume; click-to-seek on the position bar. Each
+  seek is a ~1.8 s synced re-start, not a live scrub — the fleet stays locked.
+- [x] Mic-based auto-nudge, steps 1–2 of 4 (2026-07-18) — calibration-mic
+  plumbing + level meter, then chirp emit + cross-correlation → ToF readout.
+  Both verified without a real mic; ladder continues in AUTONUDGE_PLAN.md.
 - [x] Play queue on the control page (2026-07-27) — conductor grows
   `queue: [track ids]`; `_peek_next` (non-consuming, drives prefetch + the
   "next up" marker) and `_take_next` (consuming, used only by auto-advance and
@@ -59,23 +66,20 @@ the player audio path only when unavoidable, one commit per feature so
     endpoint (off by default, so an idle conductor accepts no uploads).
   - Player page: an "add a song" file input, hidden behind a party-mode
     toggle on the control page.
-  - Risk: touches auto-advance (real scheduling code) → do the queue as its
-    own commit before the upload endpoint.
+  - Risk is now contained: the scheduling half already landed and is tested,
+    so the upload endpoint is pure HTTP + a `queue` call — no auto-advance
+    changes, revertible on its own.
 
-- [ ] **Client↔client ping testing — the "sync truth matrix"**
-  - Today all measurement is star-topology (conductor↔node). Browsers can't
-    accept inbound connections, so node↔node needs **WebRTC DataChannels**
-    with the conductor as the signaling relay (it already has sockets to
-    everyone). Unreliable/unordered channels ≈ UDP on LAN → lower jitter
-    than the WS path.
-  - The payoff is **triangle closure**: measure A↔B offset directly, compare
-    with (A−conductor)−(B−conductor) from the star. The mismatch *is* the
-    true end-to-end sync error, measured rather than inferred — display as
-    a pairwise ms matrix on the dashboard. Pure diagnostics: zero effect on
-    playback, maximal nerd joy. Could later feed nudge suggestions.
-  - Stretch: a second use of the same channels — clients could relay track
-    bytes to each other (mesh prefetch) — almost certainly never needed on
-    a LAN.
+- [ ] **Mic-based auto-nudge — finish the ladder** (the live thread)
+  - Spec + commit ladder live in [AUTONUDGE_PLAN.md](AUTONUDGE_PLAN.md).
+    Steps 1–2 shipped (mic plumbing + level meter; chirp emit + time-domain
+    cross-correlation → ToF readout on control), both verified *without* a real
+    mic — the acoustic loop is still unproven on hardware.
+  - Remaining: **step 3** sequence every speaker, difference the ToFs into
+    proposed nudges, show them on control for approval; **step 4** apply via
+    the existing `nudge` command (persisted, revertible).
+  - Gate: `getUserMedia` needs a secure context, so the real fleet waits on the
+    HTTPS story. Build and verify on `localhost` (already secure) first.
 
 - [ ] **More timing info on the dashboard** (cheap → fancy)
   - per-node `outputLatency`/`baseLatency` + sample rate (explains *why* a
@@ -87,11 +91,12 @@ the player audio path only when unavoidable, one commit per feature so
     estimate ("how much should I trust this node's numbers")
 
 ## Later / maybe
-- Writable seek bar — conductor side is trivial (same scheduled-start math
-  as resume, with a seek target); the UI/UX is the actual work.
-- Shuffle + repeat modes; drag-to-reorder queue.
-- Mic-based auto-calibration of per-node nudge (clap test / cross-correlate
-  a chirp) — replaces by-ear nudging.
+- Shuffle + repeat modes. Both are now small: shuffle = seed the queue from a
+  shuffled library; repeat-one = don't consume on advance. Drag-to-reorder is
+  the nicer version of today's ↑/↓ buttons.
+- Mesh prefetch — reuse the existing WebRTC DataChannels to relay track bytes
+  node-to-node. Almost certainly never needed on a LAN; noted so the idea
+  isn't re-derived.
 - HTTPS story (self-signed or tunnel) if ever needed: also unlocks
   `crypto.randomUUID` and — more importantly — **Wake Lock on phones**,
   which silently no-ops on plain http today; a sleeping phone suspends its

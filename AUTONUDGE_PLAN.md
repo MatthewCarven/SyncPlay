@@ -1,8 +1,10 @@
 # Phase 1 plan — mic-based auto-nudge (time-of-flight per node)
 
-Status: **planned, not started.** Buildable spec so a future session can execute
-without re-deriving. Obeys the house rule: additive, observable, revertible, one
-commit per sub-step, `git revert` always an exit.
+Status: **steps 1–2 of 4 shipped** (see the commit ladder below), both verified
+without a real mic — the acoustic loop is unproven on hardware and the fleet is
+still gated on HTTPS. Steps 3–4 are the remaining work. Obeys the house rule:
+additive, observable, revertible, one commit per sub-step, `git revert` always
+an exit.
 
 ## Goal
 
