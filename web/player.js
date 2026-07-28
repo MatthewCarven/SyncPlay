@@ -224,14 +224,59 @@ function handle(msg, c1) {
   }
 }
 
+// --- activity: what this device is actually doing right now --------------------
+// Everything here is derived from state the player already holds, so the bar
+// never lies about a phase the audio path isn't really in. Download and decode
+// are tracked separately because they feel identical from outside (a wait) and
+// behave nothing alike: one is the network, the other is ~85 MB of PCM and a
+// busy main thread.
+const dl = new Map();        // trackId -> percent, or null when size is unknown
+const decoding = new Set();  // trackId, while decodeAudioData is chewing
+let armed = false;           // countdown is up
+
+function renderActivity() {
+  const curId = current && current.trackId;
+  // A transfer for anything other than what's sounding is the prefetch of the
+  // next track. Worth distinguishing: one is a wait, the other is housekeeping.
+  const [dlId, dlPct] = dl.size ? [...dl][0] : [null, null];
+  const decId = decoding.size ? [...decoding][0] : null;
+  const busy = dlId ? "downloading" : (decId ? "decoding" : null);
+  const pct = dlId && dlPct !== null ? `${dlPct}%` : "";
+
+  let text, cls;
+  if (armed) {
+    text = busy ? `arming · ${busy}` : "arming";
+    cls = "busy";
+  } else if (current) {
+    // While playing, any transfer in flight is for a *different* track.
+    text = busy && (dlId || decId) !== curId ? `playing · ${busy} next file` : "playing";
+    cls = "play";
+  } else if (busy) {
+    text = busy;
+    cls = "busy";
+  } else {
+    text = "idle";
+    cls = "";
+  }
+  $("activityText").textContent = text;
+  $("activityPct").textContent = pct;
+  $("activity").className = cls;
+}
+
 // --- track loading ------------------------------------------------------------
 async function loadTrack(trackId, url) {
   if (cache.has(trackId) || loading.has(trackId)) return cache.get(trackId);
   loading.add(trackId);
+  dl.set(trackId, null);  // size unknown until the headers land
+  renderActivity();
   try {
     const resp = await fetch(url || `/tracks/${trackId}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const buf = await ctx.decodeAudioData(await fetchWithProgress(resp, trackId));
+    const bytes = await fetchWithProgress(resp, trackId);
+    dl.delete(trackId);
+    decoding.add(trackId);
+    renderActivity();
+    const buf = await ctx.decodeAudioData(bytes);
     cache.set(trackId, buf);
     // Decoded PCM is big (~85 MB per 4-min track): keep current + next only.
     for (const key of cache.keys()) {
@@ -245,6 +290,9 @@ async function loadTrack(trackId, url) {
     return null;
   } finally {
     loading.delete(trackId);
+    dl.delete(trackId);        // an abandoned transfer must not leave the bar
+    decoding.delete(trackId);  // stuck on "downloading" forever
+    renderActivity();
   }
 }
 
@@ -266,7 +314,12 @@ async function fetchWithProgress(resp, trackId) {
     chunks.push(value);
     received += value.length;
     const pct = Math.min(100, Math.floor((100 * received) / total));
-    if (pct >= lastPct + 2) { lastPct = pct; send({ type: "loadProgress", trackId, pct }); }
+    if (pct >= lastPct + 2) {
+      lastPct = pct;
+      send({ type: "loadProgress", trackId, pct });
+      dl.set(trackId, pct);
+      renderActivity();
+    }
   }
   const bytes = new Uint8Array(received);      // reassemble for decodeAudioData
   let o = 0;
@@ -760,6 +813,8 @@ let armTimer = null;
 
 function onArm(msg) {
   clearArm();
+  armed = true;
+  renderActivity();
   const endsAt = typeof msg.startsAtNodeMs === "number"
     ? msg.startsAtNodeMs
     : performance.now() + (msg.secondsLeft || 0) * 1000;
@@ -778,7 +833,9 @@ function onArm(msg) {
 
 function clearArm() {
   if (armTimer !== null) { clearInterval(armTimer); armTimer = null; }
+  armed = false;
   $("arming").style.display = "none";
+  renderActivity();
 }
 
 // --- ui ----------------------------------------------------------------------
@@ -791,4 +848,5 @@ function setNowPlaying(title) {
   const el = $("nowPlaying");
   el.textContent = title ? `♪ ${title}` : "nothing playing";
   el.className = title ? "active" : "";
+  renderActivity();  // every start and stop passes through here
 }

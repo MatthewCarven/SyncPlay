@@ -53,6 +53,20 @@
     font-variant-numeric: tabular-nums;
   }
   #arming .what { color: var(--dim); font-size: .78rem; margin-top: 6px; }
+  #activity {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+    padding: 8px 10px; border: 1px solid var(--edge); border-radius: 8px;
+    font-size: .78rem; letter-spacing: .04em; color: var(--dim);
+  }
+  #activity .lamp {
+    flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dim);
+  }
+  #activity.busy { color: var(--text); border-color: var(--accent); }
+  #activity.busy .lamp { background: var(--accent); animation: pulse 1.1s infinite; }
+  #activity.play { color: var(--text); border-color: var(--accent); }
+  #activity.play .lamp { background: var(--accent); }
+  #activity .pct { margin-left: auto; font-variant-numeric: tabular-nums; }
+  @keyframes pulse { 50% { opacity: .25; } }
   .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 16px; }
   .stat { background: var(--bg); border: 1px solid var(--edge); border-radius: 8px; padding: 10px 6px; text-align: center; }
   .stat .v { font-size: 1.05rem; font-weight: 700; }
@@ -83,6 +97,7 @@
 
     <div id="liveView">
       <div class="status"><div class="dot" id="dot"></div><span id="statusText">connecting…</span></div>
+      <div id="activity"><div class="lamp"></div><span id="activityText">idle</span><span class="pct" id="activityPct"></span></div>
       <div id="arming">
         <div class="count" id="armCount">—</div>
         <div class="what" id="armWhat"></div>

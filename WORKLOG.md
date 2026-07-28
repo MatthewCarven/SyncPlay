@@ -593,3 +593,27 @@ reported decoded at 0.4 s, play goes out at 6.05 s; a warm start returns in
 **Still open** — the join burst spread for nodes arriving *mid-song*, which
 takes the `_catchup` path and still gets 16 pings in one second. The arming
 work covers the cold-start half of that problem only.
+
+---
+
+## 2026-07-28 (later still) — player status bar, wider control page
+
+Small, additive, no server changes.
+
+- **Activity bar on the player page.** A composite state line each device shows
+  for itself: idle / arming / downloading N% / decoding / playing / playing +
+  downloading next file N%. Everything is derived from state the player already
+  holds, so the bar can't claim a phase the audio path isn't in.
+- **Download and decode are tracked separately** (`dl` map, `decoding` set).
+  From outside they feel identical — a wait — but they're nothing alike: one is
+  the network, the other is ~85 MB of PCM on a busy main thread. On a phone the
+  decode half is often the longer one, and a bar that called it "downloading"
+  would send you looking at the Wi-Fi.
+- Cleanup lives in `loadTrack`'s `finally`, so an abandoned or failed transfer
+  can't strand the bar on "downloading" forever.
+- Control page `.wrap` 980px -> 1080px.
+
+Walked all ten states through the real `renderActivity` against a fake DOM
+rather than eyeballing them in a browser: idle, unknown-size transfer, download
+with %, armed+downloading, armed+decoding, armed alone, playing, playing +
+prefetch, playing + decoding next, stopped.
