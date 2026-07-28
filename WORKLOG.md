@@ -504,3 +504,26 @@ survives a reload, seeds the next `ClockModel` through a 1 s join burst
 underlying physics and should land next; #2 is a two-line tuning change that
 wants its own test and its own commit, since it changes behaviour for every
 node rather than just returning ones.
+
+**Commit hygiene note (the split didn't hold).** The two bodies of work above
+were meant to land as separate commits — auto-nudge step 3, then remembered
+skew — per the house rule that one commit per feature keeps `git revert` as an
+exit. `git add -p` lost the fight with the index and took all four shared files
+(`conductor.py`, README, TODO, this file) wholesale into the first commit. The
+result as pushed:
+
+- `d292140` "Auto-nudge step 3" — also contains the entire *conductor* half of
+  the skew work (`Node.prior_skew`, `remember_skew()`, `_clean_skew()`, the
+  state-file plumbing). It does **not** contain `timesync.py`, so this commit
+  cannot run: the first node to join hits `ClockModel(prior_skew=...)` as a
+  `TypeError`. Treat it as a broken rung when bisecting.
+- `e146c7f` "Remember each node's skew across reconnects" — only `timesync.py`
+  and the two test files.
+
+So neither commit reverts cleanly: reverting the first strips the conductor
+side while leaving `prior_skew` and `test_persistence.py` behind, and the suite
+fails. HEAD itself is correct and green (66 passing) — this is a history-quality
+problem, not a correctness one. Left unrewritten deliberately: the branch was
+already pushed, and a force-push to tidy commit boundaries is a worse trade than
+this note. Worth an extra beat on the staging step next time the working tree
+holds two features at once.
