@@ -6,6 +6,14 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] Armed cold start with a synced countdown (2026-07-28) — starting from a
+  standstill with an undecoded track now broadcasts a countdown before playback
+  and holds the load gate 20 s instead of 12. `plan_start()` is pure and
+  decides on a conjunction: nothing sounding **and** somebody still loading.
+  Everything else (resume, seek, next, auto-advance) stays warm and instant.
+  The countdown targets the actual start, not the end of arming — a timer that
+  hits zero then sits silent through `PLAY_LEAD` is a timer nobody trusts
+  twice. Doubles as the spread calibration window the item below wanted.
 - [x] Remembered skew across reconnects (2026-07-28) — the last *fitted* skew
   per `clientId` persists in the state file and seeds the next `ClockModel`,
   so a returning node skips the ~30 s where it must assert zero drift. Offset
@@ -88,12 +96,16 @@ the player audio path only when unavoidable, one commit per feature so
   - No HTTPS needed for that: `localhost` is a secure context, so the conductor
     box can be the mic. HTTPS is only for putting the mic on a phone.
 
-- [ ] **Spread the join burst across more than one radio window** (the real fix
-      for cold joins; sibling of the remembered-skew commit)
+- [ ] **Spread the join burst across more than one radio window** (partly
+      mitigated by the armed cold start; still open for mid-song joins)
   - `BURST_JOIN = (16, 0.06)` puts every join sample inside a single ~1 s
     window. Those 16 are not independent: a tablet parks its Wi-Fi radio
     between beacons, so one bad window corrupts all of them together, and
     min-RTT filtering can't help when `best` is itself inflated.
+  - The arming phase already fixes this for the *cold start* case — 6 s of
+    bursts across several power-save cycles, for free, inside a wait we were
+    paying anyway. What's still exposed is a node joining **mid-song**, which
+    gets the 1 s join burst and nothing else.
   - Shape: a fast phase to get *an* estimate quickly, then a spread phase
     (~250 ms spacing for a few seconds) so the window straddles several
     power-save cycles. Costs a couple of seconds of join latency.

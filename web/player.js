@@ -195,6 +195,12 @@ function handle(msg, c1) {
     case "preload":
       loadTrack(msg.trackId, msg.url);
       break;
+    case "arm":
+      onArm(msg);
+      break;
+    case "disarm":
+      clearArm();
+      break;
     case "play":
       onPlay(msg);
       break;
@@ -270,6 +276,7 @@ async function fetchWithProgress(resp, trackId) {
 
 // --- playback -------------------------------------------------------------------
 async function onPlay(msg) {
+  clearArm();  // the real start supersedes whatever the countdown predicted
   if (ctx.state !== "running") await ctx.resume();
   let buf = cache.get(msg.trackId);
   if (!buf) buf = await loadTrack(msg.trackId, null); // late: decode, then catch up
@@ -344,6 +351,7 @@ function onSteer(msg) {
 }
 
 function onStop(msg) {
+  clearArm();
   if (!current) return;
   if (msg && typeof msg.atNodeMs === "number") {
     const when = Math.max(perfToCtx(msg.atNodeMs + nudgeMs), ctx.currentTime);
@@ -741,6 +749,36 @@ async function onMeshSignal(fromId, payload) {
       await entry.pc.addIceCandidate(payload.cand);
     }
   } catch (err) { console.warn("mesh signal error", err); }
+}
+
+// --- cold-start countdown -----------------------------------------------------
+// The conductor dates the target on *our* clock where it can, so every screen
+// in the room hits zero together rather than each hitting it at its own error.
+// Ticking is local: a countdown is a reassurance, not a scheduling primitive —
+// the actual start still arrives as a `play` with its own sample-accurate time.
+let armTimer = null;
+
+function onArm(msg) {
+  clearArm();
+  const endsAt = typeof msg.startsAtNodeMs === "number"
+    ? msg.startsAtNodeMs
+    : performance.now() + (msg.secondsLeft || 0) * 1000;
+  $("armWhat").textContent = msg.title ? `getting “${msg.title}” ready` : "getting ready";
+  $("arming").style.display = "block";
+
+  const tick = () => {
+    const left = (endsAt - performance.now()) / 1000;
+    // Zero means "the wait we predicted is over", not "audio now" — if a slow
+    // decode overran it, say so rather than freezing on 0 and looking hung.
+    $("armCount").textContent = left > 0 ? Math.ceil(left).toString() : "starting…";
+  };
+  tick();
+  armTimer = setInterval(tick, 100);
+}
+
+function clearArm() {
+  if (armTimer !== null) { clearInterval(armTimer); armTimer = null; }
+  $("arming").style.display = "none";
 }
 
 // --- ui ----------------------------------------------------------------------

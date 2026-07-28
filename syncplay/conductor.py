@@ -39,7 +39,9 @@ CATCHUP_LEAD = 0.5        # lead for a late-joining node
 PAUSE_LEAD = 0.45         # lead for a synced pause
 PRE_END_BURST = 2.5       # heavy resync burst starts this long before track end
 GAP_AFTER_TRACK = 0.15    # silence after a track before the next is scheduled
-LOAD_GATE_TIMEOUT = 12.0  # max wait for nodes to report a track decoded
+LOAD_GATE_TIMEOUT = 12.0  # warm start: fleet is going, buffer already decoded
+LOAD_GATE_COLD = 20.0     # cold start: a 70 MB decode from nothing needs room
+ARM_SECONDS = 6.0         # visible countdown floor before a cold start
 PENDING_PING_TTL = 5.0
 MAX_QUEUE = 200           # sanity cap on the explicit play queue
 MAX_PERSISTED_SKEW = 500e-6  # 500 ppm; past this it's a bad fit, not a crystal
@@ -93,6 +95,32 @@ def _clean_skew(v) -> Optional[float]:
     if not math.isfinite(s) or abs(s) > MAX_PERSISTED_SKEW:
         return None
     return s
+
+
+def plan_start(playing_now: bool, loaded: List[bool]) -> Tuple[bool, float]:
+    """Decide whether a start is *cold*, and how long to hold the load gate.
+
+    Returns ``(arm, load_gate_timeout)``.
+
+    Cold means two things at once: nothing is sounding right now, **and** at
+    least one connected node still has to fetch and decode the track. That
+    conjunction is the whole point. It is the only moment the room can actually
+    perceive a wait, so it is the only moment a countdown earns its keep — and
+    it doubles as the window the clock models want, because a 70 MB decode buys
+    several seconds of ping samples spread across many Wi-Fi power-save cycles
+    instead of sixteen crammed into one.
+
+    Everything else is warm: resume, seek, next, auto-advance. There the fleet
+    is already holding the buffer, the gate clears in milliseconds, and a
+    countdown would be delay we invented for ourselves.
+
+    With nobody connected there is nothing to arm for and nothing to wait on;
+    the caller's own "no node managed to load this" path handles it.
+    """
+    if not loaded:
+        return False, LOAD_GATE_TIMEOUT
+    cold = not playing_now and not all(loaded)
+    return cold, (LOAD_GATE_COLD if cold else LOAD_GATE_TIMEOUT)
 
 
 def plan_nudges(rows: Dict[str, List[dict]]) -> List[dict]:
@@ -306,6 +334,9 @@ class Conductor:
         # Deliberately not persisted: a queue is a mood, not a setting.
         self.queue: List[str] = []
         self.target_track: Optional[Track] = None  # track we're bringing up now (gates download-% relay)
+        # Cold-start countdown: (track, conductor time the fleet should start).
+        # Non-null only between the arm broadcast and the play that ends it.
+        self.arming: Optional[Tuple[Track, float]] = None
         self._advance_task: Optional[asyncio.Task] = None
         self._transport_task: Optional[asyncio.Task] = None
         self._pulse_task: Optional[asyncio.Task] = None
@@ -523,6 +554,15 @@ class Conductor:
                 for t in (self.tracks_by_id.get(q) for q in self.queue)
                 if t is not None
             ],
+            "arming": (
+                {
+                    "trackId": self.arming[0].id,
+                    "title": self.arming[0].title,
+                    "secondsLeft": max(0.0, self.arming[1] - now()),
+                }
+                if self.arming
+                else None
+            ),
             # What actually plays next, queue or not — drives the "next up" marker.
             "nextUp": self._next_up_id(),
             "musicDir": str(self.music_dir),
@@ -647,7 +687,9 @@ class Conductor:
 
     async def _transport_play(self, track: Track, seek_ms: float = 0.0) -> None:
         self._cancel_advance()
+        await self._disarm()  # a superseded start must not leave a countdown up
         self.target_track = track  # what the download-% pill is allowed to reflect
+        was_playing = self.playing is not None
         self.paused = None
         if self.playing is not None:
             await self._broadcast_players({"type": "stop"})
@@ -655,20 +697,42 @@ class Conductor:
 
         await self._broadcast_players(self._preload_msg(track))
 
-        # Load gate: wait for every connected node to decode (or time out).
-        deadline = now() + LOAD_GATE_TIMEOUT
+        connected = [n for n in self.nodes.values() if n.connected]
+        arm, gate = plan_start(was_playing, [track.id in n.loaded for n in connected])
+
+        t_arm_end = now() + ARM_SECONDS
+        if arm:
+            # The countdown counts to the *start*, not to the end of arming —
+            # a timer that hits zero and then sits silent through PLAY_LEAD is
+            # a timer nobody trusts twice.
+            self.arming = (track, t_arm_end + PLAY_LEAD)
+            # This window is also the calibration window. Dense bursts spread
+            # over several seconds sample several Wi-Fi power-save cycles; the
+            # 16-ping join burst can land entirely inside one bad one.
+            self.request_burst(ARM_SECONDS)
+            for node in connected:
+                await self._send_arm(node, track)
+            await self.push_state()
+
+        # Load gate: wait for every connected node to decode (or time out). When
+        # armed, also hold until the countdown runs out, so the number on screen
+        # is the truth even if the decode beat it.
+        deadline = now() + gate
         while now() < deadline:
             connected = [n for n in self.nodes.values() if n.connected]
             if connected and all(track.id in n.loaded for n in connected):
-                break
+                if not arm or now() >= t_arm_end:
+                    break
             await asyncio.sleep(0.15)
         ready = [
             n for n in self.nodes.values() if n.connected and track.id in n.loaded
         ]
         if not ready:
+            await self._disarm()
             await self.toast(f'No node managed to load "{track.title}" - not starting.')
             return
 
+        self.arming = None  # the play command below is what retires the countdown
         t_start = now() + PLAY_LEAD
         self.playing = Playback(track=track, t_start=t_start, seek_ms=seek_ms)
         started = []
@@ -683,6 +747,36 @@ class Conductor:
         # Get the *next* track decoding everywhere while this one plays.
         await self._prefetch_next()
         await self.push_state()
+
+    async def _disarm(self) -> None:
+        """Retire a countdown that will never reach its start."""
+        if self.arming is None:
+            return
+        self.arming = None
+        await self._broadcast_players({"type": "disarm"})
+
+    async def _send_arm(self, node: Node, track: Track) -> None:
+        """Countdown target for one node, on that node's own clock.
+
+        Dated per node through its clock model for the same reason play is: so
+        every screen in the room reaches zero at the same instant rather than at
+        the same instant *plus each device's clock error*. A node too fresh to
+        have an estimate gets the raw duration instead — a countdown that is a
+        few ms out is still a countdown, and refusing to show one would punish
+        exactly the node that has the longest wait ahead of it.
+        """
+        if self.arming is None:
+            return
+        est = node.model.estimate()
+        msg = {
+            "type": "arm",
+            "trackId": track.id,
+            "title": track.title,
+            "secondsLeft": max(0.0, self.arming[1] - now()),
+        }
+        if est is not None:
+            msg["startsAtNodeMs"] = est.to_node_time(self.arming[1]) * 1000.0
+        await node.send(msg)
 
     async def _send_play(self, node: Node, p: Playback) -> bool:
         """Drift-projected start command for one node. False if it can't be timed."""
@@ -764,6 +858,7 @@ class Conductor:
 
     async def _transport_stop(self) -> None:
         self._cancel_advance()
+        await self._disarm()
         self.playing = None
         self.paused = None
         self.target_track = None

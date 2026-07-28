@@ -62,6 +62,17 @@ flam — then play something.
 ## Cadence & calibration
 
 - Node joins → 16-ping burst converges its model in ~1 s.
+- **Cold start → armed countdown.** Starting from a standstill with a track no
+  node has decoded yet, the conductor broadcasts a countdown (`ARM_SECONDS`,
+  default 6) before playback and holds the load gate open for up to 20 s rather
+  than the usual 12. Every player shows the number, dated on its *own* clock so
+  all the screens hit zero together. The wait is real work, not theatre: the
+  fleet is fetching and decoding, and the conductor spends the same window
+  bursting pings — which is the point, because calibration spread over several
+  seconds samples several Wi-Fi power-save cycles, where one 1-second burst can
+  land entirely inside a bad one. Resume, seek, ⏭ next and auto-advance are all
+  *warm* (everyone already holds the buffer) and start immediately, because a
+  countdown between songs in a playlist would be maddening.
 - **Remembered skew.** A reconnecting node hands us a fresh clock epoch, so its
   offset must be re-learned from nothing. Its *crystal* is the same physical
   object it was last time, though, so the last **fitted** skew is persisted per

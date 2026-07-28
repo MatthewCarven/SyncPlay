@@ -44,6 +44,15 @@
     color: var(--dim);
   }
   #nowPlaying.active { color: var(--text); border-color: var(--accent); }
+  #arming {
+    display: none; margin-bottom: 16px; padding: 14px; text-align: center;
+    border: 1px solid var(--accent); border-radius: 8px;
+  }
+  #arming .count {
+    font-size: 2.6rem; line-height: 1.1; color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  #arming .what { color: var(--dim); font-size: .78rem; margin-top: 6px; }
   .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 16px; }
   .stat { background: var(--bg); border: 1px solid var(--edge); border-radius: 8px; padding: 10px 6px; text-align: center; }
   .stat .v { font-size: 1.05rem; font-weight: 700; }
@@ -74,6 +83,10 @@
 
     <div id="liveView">
       <div class="status"><div class="dot" id="dot"></div><span id="statusText">connecting…</span></div>
+      <div id="arming">
+        <div class="count" id="armCount">—</div>
+        <div class="what" id="armWhat"></div>
+      </div>
       <div id="nowPlaying">nothing playing</div>
       <div class="stats">
         <div class="stat"><div class="v" id="stOffset">—</div><div class="k">OFFSET ms</div></div>

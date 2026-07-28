@@ -209,7 +209,17 @@ function renderQueue() {
 
 function renderNowLine() {
   if (!snap) return;
-  if (snap.playing) {
+  if (snap.arming) {
+    // Interpolated between snapshots like the position readout, so the number
+    // moves smoothly instead of stepping once a second.
+    const elapsed = (performance.now() - snapAtPerf) / 1000;
+    const left = snap.arming.secondsLeft - elapsed;
+    $("nowLine").innerHTML = left > 0
+      ? `arming <b>${esc(snap.arming.title)}</b> · starting in ${left.toFixed(1)}s ` +
+        `<span class="pill">loading + calibrating every node</span>`
+      : `arming <b>${esc(snap.arming.title)}</b> · <span class="pill">waiting on a slow decode</span>`;
+    $("posFill").style.width = "0";
+  } else if (snap.playing) {
     const p = snap.playing;
     const elapsed = performance.now() - snapAtPerf; // ticks between snapshots
     const pos = (snap.serverNowMs + elapsed) - p.tStartMs + p.seekMs;

@@ -527,3 +527,69 @@ problem, not a correctness one. Left unrewritten deliberately: the branch was
 already pushed, and a force-push to tidy commit boundaries is a worse trade than
 this note. Worth an extra beat on the staging step next time the working tree
 holds two features at once.
+
+---
+
+## 2026-07-28 (later) — armed cold start
+
+**Prompt:** "I'm happy for a countdown from like 5 or 10 seconds on all clients
+if you started blank... we could wait until all clients have the file loaded
+before playback like?" — 70 MB of mp3 to transfer, read for timing data, seek
+and decode, on three devices at once.
+
+**First finding: the load gate already existed.** `_transport_play` has always
+broadcast the preload and then blocked up to `LOAD_GATE_TIMEOUT` until every
+connected node reports the track decoded. So "wait for all clients" was already
+the behaviour — it was just invisible, which is why it didn't feel like it.
+
+**Second finding, worth recording because it redirects the optimising.** The
+sync maths is *not* the load at playback. A ClockModel fit is a least-squares
+over at most a few hundred floats and it runs on the conductor; a node's job at
+start is one `getOutputTimestamp()` mapping and a `source.start(when)`. The cost
+is transfer and decode, which is exactly what the gate already waits on.
+
+**The good trade.** That wait is dead time we were already paying, and during it
+`self.playing is None`, so the ping loop is on the idle cadence. A cold start
+therefore *hands us* a multi-second calibration window for free — the very thing
+the "spread the join burst" TODO wanted to buy with added join latency. Making
+the wait visible and giving it a floor turns it into the spread burst.
+
+**Shipped**
+- `plan_start(playing_now, loaded) -> (arm, gate)` — pure, so the rule is
+  testable without a fleet. Cold is a **conjunction**: nothing sounding *and*
+  at least one connected node still loading. Both halves matter — the first is
+  "can the room perceive this wait", the second is "does the wait exist". Warm
+  covers resume, seek, next and auto-advance, which start instantly.
+- `LOAD_GATE_COLD = 20.0` (was a flat 12.0, kept for warm), `ARM_SECONDS = 6.0`.
+- Arming phase in `_transport_play`: broadcast `arm`, `request_burst` across the
+  window, then hold until *both* everyone has decoded and the countdown has
+  expired. A fast decode no longer short-circuits the number on screen.
+- The countdown targets `t_arm_end + PLAY_LEAD` — the real start — not the end
+  of arming. A timer that hits zero and then sits silent for 1.8 s is a timer
+  nobody trusts twice.
+- `_send_arm` dates the target on each node's own clock via its model, so every
+  screen in the room reaches zero together rather than each reaching it at the
+  same instant *plus its own clock error*. A node too fresh to have an estimate
+  gets the raw duration — refusing it a countdown would punish precisely the
+  node with the longest wait ahead of it.
+- `_disarm()` on stop, on a superseding start, and on the no-node-loaded bail.
+- Player: countdown card, local ticking (a countdown is reassurance, not a
+  scheduling primitive — the real start still arrives as `play` with its own
+  sample-accurate time). Overrun shows "starting…" rather than freezing on 0.
+- Control: `arming` in the snapshot, interpolated between snapshots in
+  `renderNowLine` so it moves smoothly instead of stepping once a second.
+
+**Tests** — 85 passing, up from 66. `tests/test_arming.py` pins the conjunction
+from both sides (dead start with one straggler arms; skip-to-unprefetched
+mid-playlist does not), resume and auto-advance staying warm, the empty-fleet
+case, and that the constants leave room for each other (`ARM_SECONDS <
+LOAD_GATE_COLD`, cold gate never shorter than warm).
+
+**Smoke-tested** against a fake fleet: cold start arms at t=0.03 s with the
+countdown targeting ARM+LEAD, holds the full 6 s even though both nodes
+reported decoded at 0.4 s, play goes out at 6.05 s; a warm start returns in
+0.00 s and never arms; stop mid-arming emits `disarm` then `stop`.
+
+**Still open** — the join burst spread for nodes arriving *mid-song*, which
+takes the `_catchup` path and still gets 16 pings in one second. The arming
+work covers the cold-start half of that problem only.
