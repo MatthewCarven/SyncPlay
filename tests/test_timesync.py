@@ -191,3 +191,80 @@ def test_window_pruning_discards_old_samples():
     horizon = max(s.midpoint for s in model._samples)
     assert all(s.midpoint >= horizon - 10.0 for s in model._samples)
     assert len(model) <= 4 * 6  # at most ~10s/2s bursts + slack
+
+
+# --- Cold joins: skew carried over from a previous session ------------------
+#
+# A reconnecting node hands us a fresh clock epoch, so its offset must be
+# re-learned from scratch. Its *crystal* is the same physical object it was
+# last time, though, and re-deriving that costs `min_slope_span` seconds of
+# pretending the drift is zero. These pin the shortcut.
+
+
+def test_prior_skew_used_while_span_too_short():
+    node = SimNode(offset0=0.5, skew_ppm=80.0, seed=5)
+    model = ClockModel(min_slope_span=30.0, prior_skew=80e-6)
+    for i in range(20):  # ~1.6 s of span: nowhere near enough to fit
+        model.add(node.exchange(100.0 + i * 0.08))
+    est = model.estimate()
+    assert est is not None
+    assert est.skew_ppm == pytest.approx(80.0)
+    assert not est.skew_fitted  # inherited, not measured — don't re-persist it
+
+
+def test_prior_skew_absent_is_the_old_behaviour():
+    node = SimNode(offset0=0.5, skew_ppm=80.0, seed=5)
+    model = ClockModel(min_slope_span=30.0)  # no prior
+    for i in range(20):
+        model.add(node.exchange(100.0 + i * 0.08))
+    est = model.estimate()
+    assert est is not None
+    assert est.skew == 0.0
+    assert not est.skew_fitted
+
+
+def test_measured_skew_overrides_a_wrong_prior():
+    node = SimNode(offset0=1.0, skew_ppm=50.0, seed=11)
+    model = ClockModel(window=600.0, prior_skew=-300e-6)  # badly wrong prior
+    node.run_bursts(model, start=1000.0, duration=600.0)
+    est = model.estimate()
+    assert est is not None
+    assert est.skew_fitted
+    assert est.skew_ppm == pytest.approx(50.0, abs=5.0)  # live data wins
+
+
+def test_prior_skew_is_clamped_to_max():
+    model = ClockModel(max_skew=500e-6, prior_skew=9.9)  # 9.9 s/s is nonsense
+    assert model.prior_skew == pytest.approx(500e-6)
+
+
+def test_seeded_join_projects_better_than_a_cold_one():
+    """The payoff: one second of join pings, then project a minute ahead."""
+    truth_ppm = 80.0
+    node = SimNode(offset0=0.5, skew_ppm=truth_ppm, seed=7)
+    cold = ClockModel()
+    warm = ClockModel(prior_skew=truth_ppm * 1e-6)
+    for i in range(16):  # BURST_JOIN: 16 pings over ~1 s
+        s = node.exchange(100.0 + i * 0.06)
+        cold.add(s)
+        warm.add(s)
+
+    later = 160.0  # a minute into the first track
+    cold_err = abs(cold.offset_at(later) - node.true_offset(later))
+    warm_err = abs(warm.offset_at(later) - node.true_offset(later))
+
+    # The cold model asserts zero drift, so it eats the full 80 ppm × 60 s.
+    assert cold_err == pytest.approx(60.0 * truth_ppm * 1e-6, abs=1e-3)
+    assert warm_err < 1e-3
+    assert warm_err < cold_err
+
+
+def test_seeded_anchor_offset_is_detrended_not_smeared():
+    """De-trending by the prior should not bias the anchor offset itself."""
+    node = SimNode(offset0=2.0, skew_ppm=100.0, jitter_mean=1e-9, seed=3)
+    model = ClockModel(prior_skew=100e-6)
+    for i in range(16):
+        model.add(node.exchange(100.0 + i * 0.06))
+    est = model.estimate()
+    assert est is not None
+    assert est.offset_at(est.at) == pytest.approx(node.true_offset(est.at), abs=1e-6)

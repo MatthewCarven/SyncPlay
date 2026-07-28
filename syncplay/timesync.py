@@ -91,13 +91,14 @@ class ClockEstimate:
     """Snapshot of a node's clock relationship to the conductor."""
 
     offset: float  # seconds, node − conductor, valid at conductor time `at`
-    skew: float  # d(offset)/dt; 0.0 until enough span to trust a slope
+    skew: float  # d(offset)/dt; the prior (or 0.0) until enough span to fit
     at: float  # conductor time the offset is anchored to
     best_rtt: float
     last_rtt: float
     n_samples: int  # samples currently in the window
     n_used: int  # samples that survived the RTT filter
     span: float  # conductor-time span covered by the used samples
+    skew_fitted: bool = False  # True only if `skew` came from this window's fit
 
     @property
     def skew_ppm(self) -> float:
@@ -123,6 +124,10 @@ class ClockModel:
     Feed it every PingSample as it arrives (bursts are just a cadence choice
     upstream — the model filters by RTT across its whole window). Ask it for
     an estimate whenever you need to schedule something.
+
+    ``prior_skew`` seeds the drift estimate for a device we have measured
+    before. It is used only until this window can fit a slope of its own; from
+    then on live data wins and ``ClockEstimate.skew_fitted`` goes True.
     """
 
     def __init__(
@@ -133,6 +138,7 @@ class ClockModel:
         max_skew: float = 500e-6,
         base_tolerance: float = 0.002,
         rel_tolerance: float = 0.25,
+        prior_skew: Optional[float] = None,
     ) -> None:
         self.window = window
         self.min_slope_samples = min_slope_samples
@@ -140,6 +146,14 @@ class ClockModel:
         self.max_skew = max_skew
         self.base_tolerance = base_tolerance
         self.rel_tolerance = rel_tolerance
+        # A skew carried over from a previous session with this same device.
+        # Offset cannot survive a reconnect (the node's clock epoch resets) but
+        # skew is a property of its crystal, not of the session — so a returning
+        # node need not spend `min_slope_span` seconds pretending it has none.
+        self.prior_skew = (
+            None if prior_skew is None
+            else max(-max_skew, min(max_skew, float(prior_skew)))
+        )
         self._samples: Deque[PingSample] = deque()
         self._latest_mid = float("-inf")
         self._cache: Optional[ClockEstimate] = None
@@ -175,6 +189,7 @@ class ClockModel:
         n = len(used)
 
         slope = 0.0
+        fitted = False
         if n >= self.min_slope_samples and span >= self.min_slope_span:
             # Least squares, centered for numerical stability.
             t_mean = sum(times) / n
@@ -187,10 +202,16 @@ class ClockModel:
                 slope = cov / var
                 # A "drift" beyond ±max_skew is a broken fit, not a real crystal.
                 slope = max(-self.max_skew, min(self.max_skew, slope))
+                fitted = True
             anchor_t, anchor_y = t_mean, y_mean
         else:
-            # Not enough span to trust a slope: robust flat offset instead.
-            anchor_t, anchor_y = self._latest_mid, median(offsets)
+            # Not enough span to trust a slope of our own. Fall back to the prior
+            # if this device left us one, and de-trend the window by it so the
+            # anchor is a clean offset at `latest_mid` rather than a smear. With
+            # no prior this is exactly the old behaviour: flat median offset.
+            slope = self.prior_skew or 0.0
+            anchor_t = self._latest_mid
+            anchor_y = median(s.offset - slope * (s.midpoint - anchor_t) for s in used)
 
         self._cache = ClockEstimate(
             offset=anchor_y,
@@ -201,6 +222,7 @@ class ClockModel:
             n_samples=len(self._samples),
             n_used=n,
             span=span,
+            skew_fitted=fitted,
         )
         return self._cache
 
