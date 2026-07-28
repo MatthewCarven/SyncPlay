@@ -6,6 +6,11 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] Remembered skew across reconnects (2026-07-28) — the last *fitted* skew
+  per `clientId` persists in the state file and seeds the next `ClockModel`,
+  so a returning node skips the ~30 s where it must assert zero drift. Offset
+  still resets (the node's clock epoch does too); only the crystal carries
+  over. Guarded so an inherited prior is never re-banked as a measurement.
 - [x] Writable seek bar + ⏮ restart (2026-07-22) — `seek` control command
   re-plays the current track at an absolute `positionMs` through the same
   coordinated-start path as resume; click-to-seek on the position bar. Each
@@ -70,16 +75,42 @@ the player audio path only when unavoidable, one commit per feature so
     so the upload endpoint is pure HTTP + a `queue` call — no auto-advance
     changes, revertible on its own.
 
-- [ ] **Mic-based auto-nudge — finish the ladder** (the live thread)
-  - Spec + commit ladder live in [AUTONUDGE_PLAN.md](AUTONUDGE_PLAN.md).
-    Steps 1–2 shipped (mic plumbing + level meter; chirp emit + time-domain
-    cross-correlation → ToF readout on control), both verified *without* a real
-    mic — the acoustic loop is still unproven on hardware.
-  - Remaining: **step 3** sequence every speaker, difference the ToFs into
-    proposed nudges, show them on control for approval; **step 4** apply via
-    the existing `nudge` command (persisted, revertible).
-  - Gate: `getUserMedia` needs a secure context, so the real fleet waits on the
-    HTTPS story. Build and verify on `localhost` (already secure) first.
+- [ ] **Mic-based auto-nudge — step 4 of 4** (the live thread)
+  - Spec + ladder in [AUTONUDGE_PLAN.md](AUTONUDGE_PLAN.md). Steps 1–3 shipped;
+    the sweep now proposes a nudge per speaker on the control page.
+  - Remaining: **apply**. Cheap — the control page fires the existing per-node
+    `nudge` command for each accepted proposal, so there's no new server
+    surface. Wants an explicit confirm and an obvious undo (the old values are
+    right there in the table).
+  - **The real blocker is not code, it's a room.** Everything so far is verified
+    against simulated nodes: the arithmetic and the sequencing are right, but no
+    chirp has ever crossed actual air. First hardware run is the milestone.
+  - No HTTPS needed for that: `localhost` is a secure context, so the conductor
+    box can be the mic. HTTPS is only for putting the mic on a phone.
+
+- [ ] **Spread the join burst across more than one radio window** (the real fix
+      for cold joins; sibling of the remembered-skew commit)
+  - `BURST_JOIN = (16, 0.06)` puts every join sample inside a single ~1 s
+    window. Those 16 are not independent: a tablet parks its Wi-Fi radio
+    between beacons, so one bad window corrupts all of them together, and
+    min-RTT filtering can't help when `best` is itself inflated.
+  - Shape: a fast phase to get *an* estimate quickly, then a spread phase
+    (~250 ms spacing for a few seconds) so the window straddles several
+    power-save cycles. Costs a couple of seconds of join latency.
+  - Pairs with gating `_catchup` on estimate *quality* rather than existence —
+    it currently proceeds as soon as `estimate() is not None`, i.e. after one
+    surviving ping, though its `range(25)` loop is willing to wait 5 s.
+    `n_used >= 8` would cost a late joiner about a second.
+
+- [ ] **Re-tune `filter_best` so slow nodes aren't handed a wider gate**
+  - `cutoff = best + 0.002 + 0.25×best`. At best=3.8 ms (tablet) that admits
+    1.8× best, each admitted sample carrying up to ±3.3 ms of path asymmetry.
+    At best=0.2 ms (loopback) it's 11× best, but 11× of nothing is nothing.
+    The 2 ms absolute floor only bites the node least able to absorb it.
+  - Wants its own commit and its own test: unlike remembered skew, this
+    changes behaviour for *every* node, not just returning ones. Sim coverage
+    in `test_timesync.py` should show it helps a jittery node without
+    starving a quiet one of samples.
 
 - [ ] **More timing info on the dashboard** (cheap → fancy)
   - per-node `outputLatency`/`baseLatency` + sample rate (explains *why* a

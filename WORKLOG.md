@@ -1,5 +1,68 @@
 # SyncPlay worklog
 
+## 2026-07-27 — auto-nudge step 3: sweep every speaker, propose nudges
+
+Matthew asked what HTTPS would take. Answering it properly turned up something
+better: I'd previously called HTTPS the critical path for the acoustic half of
+the roadmap, and that was wrong. `localhost` is already a secure context — which
+is *why* steps 1–2 could be built at all — so step 3 needed no certificates
+whatsoever. Better still, the conductor's own machine is the ideal mic node: its
+clock **is** the reference clock, so the mic's own offset error is zero. HTTPS is
+only needed to put the mic on a phone. We built step 3 instead of buying a domain.
+
+The sweep: one speaker at a time (others silent), `CAL_REPS` chirps each, a gap
+between probes so reflections die, then `plan_nudges()` turns the readings into
+one proposal per speaker. Progress broadcasts per rep — a 15-second silent wait
+is indistinguishable from a hang.
+
+Three judgement calls, all of them in a pure function so they could be tested
+without a microphone:
+
+- **Median, not mean.** One mis-picked correlation peak — a reflection, a door —
+  is a wild outlier, and a mean smears it across the answer. The median ignores
+  it. That is the entire reason for taking reps, and the test that pins it plants
+  a 410 ms rep among 10 ms ones and demands the answer stay 10.4.
+- **Align to the latest arrival.** `target = max(median ToF)`, so every proposal
+  is ≥ 0. You can delay a speaker; you cannot make a distant one arrive sooner,
+  so the furthest speaker sets the pace.
+- **A speaker we couldn't hear is excluded, not guessed.** Too few clean reps →
+  no proposal, and critically it's left out of the target too, so one deaf
+  measurement can't re-time the whole room. Absurd spacing (>500 ms ≈ 170 m of
+  air) is flagged rather than silently clamped: a clamp would look like a
+  successful calibration.
+
+Read-only on purpose. The table proposes; a human applies. A bad peak should
+cost a re-run, not a wrecked calibration you then un-tune by ear. Step 4 is
+cheap when it comes — the control page can just fire the existing per-node
+`nudge` command per accepted row, needing no new server surface.
+
+`_measure_one` and the sweep now share one `_probe_once` (awaitable, resolves a
+future from the `measureResult` handler), so the 📏 single-shot button behaves
+exactly as before and remains the debugging tool when a sweep looks wrong.
+
+**Verified — and be precise about what that means.** `tests/test_calibration.py`
+(10 cases) pins the arithmetic, including a test that adds a constant 137 ms to
+every reading and demands the proposals not move, since the mic's input latency
+is exactly such a constant. Then a harness of *simulated* player sockets — real
+WebSockets, real ping cadence, real clock models, real sequencing — answered
+`measureArm`/`measureEmit` with planted time-of-flights of 8/19.5/33 ms plus that
+137 ms mic latency, and the conductor proposed 25.0/13.5/0.0: the planted
+differences exactly, constant cancelled. A deliberately deaf speaker got no
+proposal and did not shift the target. 39 tests pass.
+
+**What is still unproven: everything acoustic.** No chirp has crossed actual air
+in this project yet. The orchestration and the maths are right; whether the
+correlator finds a real direct-path peak in a real room with real speakers is
+untested, and it's the only question that matters now.
+
+**For meatthread0:** the first hardware run. Conductor machine's own browser at
+`http://localhost:8927/` → JOIN → "use as calibration mic", two other devices as
+speakers, stop playback, hit **📐 calibrate all**. What to watch: `peak` should
+be well clear of 0.15 (that's the gate), `±` spread should be small — a wide
+spread means the correlator is picking different reflections each rep — and the
+proposals should be in the low tens of ms for a normal room. If the numbers look
+mad, hit 📏 on a single speaker and read the raw ToF.
+
 ## 2026-07-27 — play queue on the control page
 
 Matthew wanted a queue button to adjust what plays next. TODO.md had already
@@ -376,3 +439,68 @@ dependency-free module. Built milestones 1–4 plus most of 5 in one session.
 **For meatthread0**
 - `git init` still pending — repo-worthy since the first commit of this session.
 - Conductor left running on port 8927 for immediate phone testing.
+
+---
+
+## 2026-07-28 — cold-join accuracy: remembered skew
+
+**Prompt:** four nodes locked and closing to ≤0.22 ms on the mesh, but the
+tablet sits at −3.8 ms err with n=25 samples, and it's worst right after it
+joins. Question was whether anything can be done about the weakest moment in a
+node's life, when its calibration data barely exists.
+
+**Diagnosis (three separate things, only one fixed today)**
+
+1. *All join calibration is drawn from a single ~1 s window.* `BURST_JOIN =
+   (16, 0.06)` fires 16 pings inside one second. They are not 16 independent
+   samples — tablets power-save the Wi-Fi radio aggressively, so one bad beacon
+   window corrupts the whole burst at once, and min-RTT filtering cannot rescue
+   a window where `best` is itself inflated.
+2. *`filter_best`'s tolerance is backwards for slow nodes.* `cutoff = best +
+   0.002 + 0.25×best`. For the tablet (best 3.8 ms) that admits samples up to
+   1.8× best, each carrying up to ±3.3 ms of path asymmetry — which is roughly
+   the error being observed. For the laptop (best 0.2 ms) the same formula is
+   11× best, but 11× of nothing is nothing. The 2 ms absolute floor only bites
+   the node least able to absorb it.
+3. *Skew was discarded on every reconnect.* `begin_session()` rebuilt a bare
+   `ClockModel()`. Correct for offset — `performance.now()` restarts with the
+   page — but skew belongs to the **crystal**, not the page-life.
+
+**Shipped: #3.** Chosen first for being the largest win against the least risk;
+the persistence plumbing (nudges, volumes, EQs keyed by `clientId`) already
+existed and skew slots straight into it.
+
+- `timesync.py` — `ClockModel(prior_skew=...)`, clamped to `max_skew` on the
+  way in. Used only while the window can't fit its own slope; the short-window
+  branch now de-trends by the prior before medianing, so the anchor offset is a
+  clean value at `latest_mid` rather than a smear. `ClockEstimate.skew_fitted`
+  distinguishes a measured slope from an inherited one. With no prior supplied
+  the behaviour is byte-for-byte the old one (slope 0.0, median offset).
+- `conductor.py` — `Node.prior_skew` + `Node.remember_skew()`, which banks a
+  skew **only if `skew_fitted`**. That guard is the whole safety story: an
+  inherited prior can never launder itself into a measurement, so one bad
+  reading cannot outlive the next good session. `end_session()` banks and
+  `_save_state()` also refreshes from live models, so a conductor killed
+  mid-session still remembers. `_clean_skew()` rejects non-finite values and
+  anything past ±500 ppm on load, so a corrupt state file degrades to today's
+  cold start rather than to a confidently wrong join. Join log now prints
+  `[seeded +19.9 ppm]` when a prior is in play.
+
+**Tests** — 66 passing (was 45). New `tests/test_persistence.py` covers
+`remember_skew` refusing to bank a prior, banking a real fit, `end_session`
+capture, the full "wrong prior cannot outlive one good session" sequence, and
+`_clean_skew` against junk input. New cases in `test_timesync.py` pin that the
+prior is used while span is short, that a real fit overrides even a badly wrong
+prior, that the anchor isn't biased by de-trending, and the payoff: after a 16-
+ping/1 s join burst, projecting 60 s ahead, a cold model eats the full
+80 ppm × 60 s ≈ 4.8 ms while a seeded one stays under 1 ms.
+
+**Verified end-to-end** against a copy of the real `syncplay_state.json`: a
+legacy file with no `skews` key loads clean, a fitted 19.9 ppm writes and
+survives a reload, seeds the next `ClockModel` through a 1 s join burst
+(`skew_fitted=False`, as it should be), and a hand-corrupted file loads empty.
+
+**Left on the table (see TODO)** — #1 and #2 above. #1 is the real fix for the
+underlying physics and should land next; #2 is a two-line tuning change that
+wants its own test and its own commit, since it changes behaviour for every
+node rather than just returning ones.

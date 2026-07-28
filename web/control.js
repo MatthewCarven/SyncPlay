@@ -26,6 +26,8 @@ function connect() {
     }
     else if (msg.type === "loadProgress") setNodePill(msg.nodeId, msg.pct, msg.done);
     else if (msg.type === "measureToF") showMeasure(msg);
+    else if (msg.type === "calibrateProgress") showCalProgress(msg);
+    else if (msg.type === "calibrateResult") showCalResult(msg);
   };
   ws.onclose = () => {
     $("connState").textContent = "· reconnecting…";
@@ -59,6 +61,7 @@ $("btnResync").onclick = () => cmd({ cmd: "resync" });
 $("btnRescan").onclick = () => cmd({ cmd: "rescan" });
 $("btnQueueClear").onclick = () => cmd({ cmd: "queueClear" });
 $("measureBtn").onclick = () => cmd({ cmd: "measure" });
+$("calibrateBtn").onclick = () => cmd({ cmd: "calibrate" });
 
 // Click the position bar to seek: the whole fleet re-starts together at that
 // spot (same coordinated-start path as play/resume). Optimistically snap the fill
@@ -406,6 +409,42 @@ function showMeasure(m) {
   const snr = (m.snr != null) ? ` · snr ${(+m.snr).toFixed(1)}` : "";
   $("measureOut").textContent =
     `${m.speakerName} → mic: ToF ${(+m.tofMs).toFixed(2)} ms${peak}${snr}`;
+}
+
+// --- calibration sweep (auto-nudge step 3) -----------------------------------
+// The sweep takes ~15 s of chirps, so show which speaker is being measured as it
+// goes — a silent progress-less wait is indistinguishable from a hang. The
+// result table is READ-ONLY: it proposes nudges, it never applies them.
+function showCalProgress(m) {
+  $("calProgress").textContent = m.total
+    ? `measuring ${m.speakerName} · rep ${m.rep}/${m.reps} · ${m.done}/${m.total}`
+    : "";
+}
+
+function showCalResult(m) {
+  const rows = m.rows || [];
+  $("calRows").innerHTML = rows.map((r) => {
+    const ok = r.proposedMs !== null && r.proposedMs !== undefined;
+    const delta = ok ? r.proposedMs - (r.currentMs || 0) : 0;
+    return `<tr>
+      <td>${esc(r.name)}${r.note ? ` <span class="pill">· ${esc(r.note)}</span>` : ""}</td>
+      <td class="num">${r.tofMs === null || r.tofMs === undefined ? "—" : (+r.tofMs).toFixed(2)}</td>
+      <td class="num">${(+r.spreadMs).toFixed(2)}</td>
+      <td class="num">${r.peak == null ? "—" : `${(+r.peak).toFixed(2)}/${(+r.snr).toFixed(1)}`}</td>
+      <td class="num">${r.nGood}/${r.nTotal}</td>
+      <td class="num">${(+r.currentMs).toFixed(0)}</td>
+      <td class="num ${ok ? "closureOk" : "closureBad"}">${
+        ok ? `${r.proposedMs.toFixed(1)}${Math.abs(delta) >= 0.5
+              ? ` <span class="pill">(${delta > 0 ? "+" : ""}${delta.toFixed(0)})</span>` : ""}`
+           : "—"}</td>
+    </tr>`;
+  }).join("");
+  $("calNote").innerHTML =
+    `measured against <b>${esc(m.micName)}</b> · median of ${m.reps} reps · ` +
+    `aligned to the latest arrival, so every proposal delays a speaker rather than ` +
+    `rushing one. <b>Nothing has been applied</b> — these are proposals only.`;
+  $("calResult").style.display = rows.length ? "block" : "none";
+  $("calProgress").textContent = "";
 }
 
 // --- helpers (also used from inline handlers) --------------------------------------

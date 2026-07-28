@@ -16,6 +16,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
+import statistics
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +42,17 @@ GAP_AFTER_TRACK = 0.15    # silence after a track before the next is scheduled
 LOAD_GATE_TIMEOUT = 12.0  # max wait for nodes to report a track decoded
 PENDING_PING_TTL = 5.0
 MAX_QUEUE = 200           # sanity cap on the explicit play queue
+MAX_PERSISTED_SKEW = 500e-6  # 500 ppm; past this it's a bad fit, not a crystal
+
+# --- acoustic calibration (auto-nudge) -------------------------------------
+MEASURE_LEAD = 0.4        # how far ahead a chirp emit is scheduled
+MEASURE_WINDOW_MS = 900   # mic capture window per probe
+MEASURE_TIMEOUT = 3.0     # give up on a probe that never reports back
+CAL_REPS = 3              # chirps per speaker; medianed to survive one bad peak
+CAL_GAP = 0.35            # silence between probes, so reflections die down
+CAL_MIN_PEAK = 0.15       # correlation peak below this = didn't really hear it
+CAL_MIN_GOOD = 2          # reps that must clear the gate before we'll propose
+MAX_NUDGE_MS = 500.0      # matches the clamp on the manual nudge input
 
 # --- ping cadence: (count, spacing_s) --------------------------------------
 BURST_JOIN = (16, 0.06)     # right after a node connects: converge fast
@@ -67,6 +80,80 @@ def _clean_eq(vals) -> List[float]:
     return out
 
 
+def _clean_skew(v) -> Optional[float]:
+    """Validate a persisted skew (s/s). None if it isn't a plausible crystal.
+
+    Anything beyond ±MAX_PERSISTED_SKEW is a bad fit that got written to disk,
+    not a real oscillator; refusing to load it means a corrupt state file
+    degrades to today's cold-start behaviour instead of poisoning a join."""
+    try:
+        s = float(v)
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(s) or abs(s) > MAX_PERSISTED_SKEW:
+        return None
+    return s
+
+
+def plan_nudges(rows: Dict[str, List[dict]]) -> List[dict]:
+    """Turn repeated ToF probes into a proposed nudge per speaker.
+
+    `rows` maps speaker id -> that speaker's probe results. Pure function: no
+    clock, no sockets, no node objects — so the arithmetic that decides how your
+    system sounds can be tested exhaustively without a microphone in the loop.
+
+    Two judgement calls live here:
+
+    * **Median, not mean.** A single mis-picked correlation peak (a reflection,
+      a door closing) is a wild outlier, and a mean would smear it across the
+      answer. The median just ignores it, which is the whole reason for reps.
+    * **Align to the latest arrival.** target = max(median ToF), so every nudge
+      comes out >= 0. We can only ever *delay* a speaker; there's no making a
+      distant one arrive earlier, so the furthest speaker sets the pace.
+
+    A speaker without CAL_MIN_GOOD clean reps gets proposedMs None and is left
+    out of the target entirely — it must not drag the whole room to match a
+    number we don't believe.
+    """
+    summary: List[dict] = []
+    for spk_id, probes in rows.items():
+        good = [p for p in probes if (p.get("peak") or 0.0) >= CAL_MIN_PEAK]
+        tofs = sorted(p["tofMs"] for p in good)
+        row = {
+            "id": spk_id,
+            "nGood": len(good),
+            "nTotal": len(probes),
+            "tofMs": statistics.median(tofs) if tofs else None,
+            # Spread across reps is the honest confidence signal: tight means
+            # the room and the correlator agree, wide means don't trust it.
+            "spreadMs": (tofs[-1] - tofs[0]) if len(tofs) > 1 else 0.0,
+            "peak": max((p.get("peak") or 0.0) for p in good) if good else None,
+            "snr": max((p.get("snr") or 0.0) for p in good) if good else None,
+            "proposedMs": None,
+            "note": "",
+        }
+        if len(good) < CAL_MIN_GOOD:
+            row["note"] = ("no usable capture" if not good
+                           else f"only {len(good)} clean rep(s)")
+        summary.append(row)
+
+    usable = [r for r in summary if r["tofMs"] is not None and not r["note"]]
+    if not usable:
+        return summary
+    target = max(r["tofMs"] for r in usable)
+    for row in usable:
+        nudge = target - row["tofMs"]
+        if nudge > MAX_NUDGE_MS:
+            # >500 ms apart is ~170 m of air. Far likelier a bad peak than a
+            # real room, so say so rather than quietly clamping to a fiction.
+            row["note"] = "implausible (>%.0f ms) - re-run" % MAX_NUDGE_MS
+        else:
+            row["proposedMs"] = round(nudge, 1)
+    if len(usable) == 1:
+        usable[0]["note"] = "only speaker measured - nothing to align against"
+    return summary
+
+
 @dataclass
 class Track:
     id: str
@@ -88,11 +175,18 @@ class Playback:
 class Node:
     """One player device. Identity survives reconnects; the clock model doesn't
     (performance.now() restarts with every page load), and neither do decoded
-    buffers, so both reset on a fresh socket."""
+    buffers, so both reset on a fresh socket.
+
+    Its *skew* is the exception. Crystal drift belongs to the hardware, not the
+    page-life, so it is carried across sessions (and across conductor restarts,
+    via syncplay_state.json) to seed the next model. Without it every returning
+    node spends its first ~30 s asserting zero drift — which for a 20 ppm tablet
+    is the difference between joining clean and joining a few ms out."""
 
     def __init__(self, client_id: str, name: str):
         self.client_id = client_id
         self.name = name
+        self.prior_skew: Optional[float] = None  # last *fitted* skew, seconds/second
         self.nudge_ms = 0.0
         self.volume: Optional[int] = None  # None = never set from control
         self.eq_db: List[float] = [0.0] * 5  # per-node output EQ, pushed from control
@@ -118,7 +212,7 @@ class Node:
         self.ws = ws
         self.ua = ua
         self.connected = True
-        self.model = ClockModel()
+        self.model = ClockModel(prior_skew=self.prior_skew)
         self.pending.clear()
         self.loaded.clear()
         self.load_track = None
@@ -129,7 +223,18 @@ class Node:
         self.burst_until = 0.0
         self.mic = False  # mic mode is per page-life; the client re-announces it
 
+    def remember_skew(self) -> bool:
+        """Carry this session's measured drift forward. Only a real fit counts:
+        echoing an inherited prior straight back would let one bad reading
+        outlive every session after it. Returns whether anything was learned."""
+        est = self.model.estimate()
+        if est is None or not est.skew_fitted:
+            return False
+        self.prior_skew = est.skew
+        return True
+
     def end_session(self) -> None:
+        self.remember_skew()
         self.connected = False
         self.ws = None
         self.pending.clear()
@@ -209,9 +314,11 @@ class Conductor:
         # ClockModel whose timeline is the *initiator's* clock. Diagnostic only.
         self.mesh_pairs: Dict[Tuple[str, str], ClockModel] = {}
         self.mesh_seen: Dict[Tuple[str, str], float] = {}
-        # Acoustic measurement (auto-nudge step 2): one in-flight ToF probe.
+        # Acoustic measurement: one in-flight ToF probe, and a flag so two
+        # calibration sweeps can't interleave chirps and read each other's echoes.
         self._measure_seq = 0
         self._measure_pending: Optional[dict] = None
+        self._calibrating = False
         self.scan_tracks()
 
     # --- library ------------------------------------------------------------
@@ -305,13 +412,24 @@ class Conductor:
                 "nudges": {str(k): float(v) for k, v in data.get("nudges", {}).items()},
                 "volumes": {str(k): int(v) for k, v in data.get("volumes", {}).items()},
                 "eqs": {str(k): _clean_eq(v) for k, v in data.get("eqs", {}).items()},
+                "skews": {
+                    str(k): s
+                    for k, v in data.get("skews", {}).items()
+                    if (s := _clean_skew(v)) is not None
+                },
             }
         except (OSError, ValueError, TypeError):
-            return {"nudges": {}, "volumes": {}, "eqs": {}}
+            return {"nudges": {}, "volumes": {}, "eqs": {}, "skews": {}}
 
     def _save_state(self) -> None:
         try:
             for n in self.nodes.values():
+                # Refresh from live models too, not just at disconnect — a
+                # conductor that is killed mid-session should still remember.
+                if n.connected:
+                    n.remember_skew()
+                if n.prior_skew is not None:
+                    self._state["skews"][n.client_id] = round(n.prior_skew, 12)
                 if n.nudge_ms:
                     self._state["nudges"][n.client_id] = n.nudge_ms
                 else:
@@ -665,43 +783,148 @@ class Conductor:
                     n += 1
         await self.toast(f"Beep scheduled on {n} node(s) - listen for one single beep.")
 
-    async def _measure_one(self, speaker_id: str) -> None:
-        """Emit a chirp on one speaker at a synced instant; the mic node cross-
-        correlates it into a time-of-flight. Auto-nudge groundwork (step 2).
+    def _calibration_roles(self, speaker_id: str = "") -> Tuple[Optional[Node], List[Node]]:
+        """(mic, speakers) for a calibration run, or (None, []) with a toast queued.
 
-        The reported ToF carries a constant per-mic offset (mic input latency +
-        the ctx->perf mapping bias), so only *differences* between speakers are
-        physical — which is exactly what step 3 will difference into nudges.
+        Exactly one mic: two mics would mean two different reference positions,
+        and the ToF differences we're about to take would be meaningless.
         """
         mics = [n for n in self.nodes.values() if n.connected and n.mic]
         if len(mics) != 1:
+            return None, []
+        mic = mics[0]
+        speakers = [n for n in self.nodes.values() if n.connected and n is not mic]
+        if speaker_id:
+            want = self.nodes.get(speaker_id)
+            if want is not None and want in speakers:
+                speakers = [want]
+        return mic, speakers
+
+    async def _probe_once(self, spk: Node, mic: Node) -> Optional[dict]:
+        """One chirp on `spk`, cross-correlated at `mic`. Returns its ToF or None.
+
+        The ToF carries a constant per-mic offset (mic input latency + the
+        ctx->perf mapping bias). That constant cancels the moment we difference
+        two speakers against each other, which is the only way this number is
+        ever used — never trust a single ToF as an absolute distance.
+        """
+        est_s, est_m = spk.model.estimate(), mic.model.estimate()
+        if est_s is None or est_m is None:
+            return None
+        self._measure_seq += 1
+        seq = self._measure_seq
+        t_emit = now() + MEASURE_LEAD
+        waiter: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._measure_pending = {
+            "seq": seq, "spk": spk.client_id, "mic": mic.client_id,
+            "t_emit": t_emit, "waiter": waiter,
+        }
+        await mic.send({"type": "measureArm", "seq": seq, "windowMs": MEASURE_WINDOW_MS})
+        await spk.send({"type": "measureEmit", "seq": seq,
+                        "atNodeMs": est_s.to_node_time(t_emit) * 1000.0})
+        try:
+            return await asyncio.wait_for(waiter, MEASURE_TIMEOUT)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            if self._measure_pending and self._measure_pending.get("seq") == seq:
+                self._measure_pending = None
+
+    async def _measure_one(self, speaker_id: str) -> None:
+        """The single 📏 probe: one speaker, one chirp, ToF straight to control."""
+        if self.playing is not None:
+            await self.toast("Stop playback before calibrating.")
+            return
+        mic, speakers = self._calibration_roles(speaker_id)
+        if mic is None:
             await self.toast("Calibration needs exactly one active mic node.")
             return
-        mic = mics[0]
-        spk = self.nodes.get(speaker_id)
-        if spk is None or not spk.connected or spk is mic:
-            spk = next((n for n in self.nodes.values()
-                        if n.connected and n is not mic), None)
-        if spk is None:
+        if not speakers:
             await self.toast("No speaker node to measure.")
+            return
+        spk = speakers[0]
+        await self.toast(f"Measuring {spk.name} -> {mic.name}...")
+        res = await self._probe_once(spk, mic)
+        if res is None:
+            await self.toast(f"No usable capture from {spk.name}.")
+            return
+        await self._broadcast_control(
+            {
+                "type": "measureToF",
+                "speakerId": spk.client_id,
+                "speakerName": spk.name,
+                "micId": mic.client_id,
+                "tofMs": res["tofMs"],
+                "peak": res.get("peak"),
+                "snr": res.get("snr"),
+            }
+        )
+
+    async def _measure_all(self) -> None:
+        """Auto-nudge step 3: sweep every speaker, propose per-node nudges.
+
+        One speaker at a time (the others silent), several reps each, then the
+        medians get differenced into nudges. Proposals only — nothing is applied
+        here; a human reads the table and decides. That split is deliberate: a
+        bad correlation peak should cost you a re-run, not a silently wrecked
+        calibration you then have to un-tune by ear.
+        """
+        if self._calibrating:
+            await self.toast("A calibration sweep is already running.")
             return
         if self.playing is not None:
             await self.toast("Stop playback before calibrating.")
             return
-        est_s, est_m = spk.model.estimate(), mic.model.estimate()
-        if est_s is None or est_m is None:
+        mic, speakers = self._calibration_roles()
+        if mic is None:
+            await self.toast("Calibration needs exactly one active mic node.")
+            return
+        if not speakers:
+            await self.toast("No speaker nodes to measure.")
+            return
+        if any(n.model.estimate() is None for n in speakers + [mic]):
             await self.toast("Clocks not converged yet - give it a few seconds.")
             return
-        self._measure_seq += 1
-        seq = self._measure_seq
-        t_emit = now() + 0.4
-        self._measure_pending = {
-            "seq": seq, "spk": spk.client_id, "mic": mic.client_id, "t_emit": t_emit,
-        }
-        await mic.send({"type": "measureArm", "seq": seq, "windowMs": 900})
-        await spk.send({"type": "measureEmit", "seq": seq,
-                        "atNodeMs": est_s.to_node_time(t_emit) * 1000.0})
-        await self.toast(f"Measuring {spk.name} -> {mic.name}...")
+
+        self._calibrating = True
+        rows: Dict[str, List[dict]] = {n.client_id: [] for n in speakers}
+        try:
+            total = len(speakers) * CAL_REPS
+            done = 0
+            for spk in speakers:
+                for rep in range(CAL_REPS):
+                    if self.playing is not None:       # someone hit play: bail out
+                        await self.toast("Calibration aborted - playback started.")
+                        return
+                    if not (spk.connected and mic.connected):
+                        break
+                    done += 1
+                    await self._broadcast_control({
+                        "type": "calibrateProgress", "speakerName": spk.name,
+                        "rep": rep + 1, "reps": CAL_REPS, "done": done, "total": total,
+                    })
+                    res = await self._probe_once(spk, mic)
+                    if res is not None:
+                        rows[spk.client_id].append(res)
+                    await asyncio.sleep(CAL_GAP)       # let the room go quiet again
+
+            plan = plan_nudges(rows)
+            for row in plan:
+                node = self.nodes.get(row["id"])
+                row["name"] = node.name if node else row["id"]
+                row["currentMs"] = node.nudge_ms if node else 0.0
+            await self._broadcast_control({
+                "type": "calibrateResult", "micName": mic.name, "reps": CAL_REPS,
+                "rows": plan,
+            })
+            good = sum(1 for r in plan if r["proposedMs"] is not None)
+            await self.toast(
+                f"Calibration swept {len(speakers)} speaker(s): "
+                f"{good} usable. Nothing applied yet - check the table."
+            )
+        finally:
+            self._calibrating = False
+            await self._broadcast_control({"type": "calibrateProgress", "done": 0, "total": 0})
 
     async def _steer_all(self) -> None:
         """v2 servo reference: 'at your local time L the song should be at P'.
@@ -797,6 +1020,7 @@ class Conductor:
             node.nudge_ms = self._state["nudges"].get(client_id, 0.0)
             node.volume = self._state["volumes"].get(client_id)
             node.eq_db = self._state["eqs"].get(client_id, [0.0] * 5)
+            node.prior_skew = self._state["skews"].get(client_id)
             self.nodes[client_id] = node
         else:
             node.name = name
@@ -807,8 +1031,12 @@ class Conductor:
         node.mesh = supports_mesh
         self._drop_mesh_pairs_for(node.client_id)  # stale pairs from a past life
         # Tail slice: date-based fallback ids all share the same *head*.
-        log.info("node joined: %s (~%s)%s", node.name, node.client_id[-8:],
-                 " [mesh]" if node.mesh else "")
+        log.info(
+            "node joined: %s (~%s)%s%s", node.name, node.client_id[-8:],
+            " [mesh]" if node.mesh else "",
+            "" if node.prior_skew is None
+            else " [seeded %+.1f ppm]" % (node.prior_skew * 1e6),
+        )
 
         await node.send(
             {"type": "welcome", "nodeId": node.client_id, "name": node.name,
@@ -835,7 +1063,8 @@ class Conductor:
                 await self._on_player_msg(node, data, t3)
         finally:
             if node.ws is ws:
-                node.end_session()
+                node.end_session()  # banks this session's fitted skew
+                self._save_state()  # ...and gets it onto disk while we know it
                 self._drop_mesh_pairs_for(node.client_id)
                 log.info("node left: %s", node.name)
                 await self._push_mesh_roster()
@@ -974,33 +1203,32 @@ class Conductor:
                     {"type": "micLevel", "nodeId": node.client_id, "rms": rms}
                 )
         elif kind == "measureResult":
+            # Resolve whoever is awaiting this probe. The caller (_probe_once)
+            # owns what happens next — a single readout, or one rep of a sweep.
             pend = self._measure_pending
             if pend is None or data.get("seq") != pend["seq"] or node.client_id != pend["mic"]:
                 return
             self._measure_pending = None
+            waiter = pend.get("waiter")
+            result = None
             if data.get("error"):
                 await self.toast(f"Measurement failed: {data.get('error')}")
-                return
-            est_m = node.model.estimate()
-            if est_m is None:
-                return
-            try:
-                arrival = est_m.to_conductor_time(float(data["arrivalPerfMs"]) / 1000.0)
-            except (KeyError, ValueError, TypeError):
-                return
-            tof_ms = (arrival - pend["t_emit"]) * 1000.0
-            spk = self.nodes.get(pend["spk"])
-            await self._broadcast_control(
-                {
-                    "type": "measureToF",
-                    "speakerId": pend["spk"],
-                    "speakerName": spk.name if spk else pend["spk"],
-                    "micId": pend["mic"],
-                    "tofMs": tof_ms,
-                    "peak": data.get("peak"),
-                    "snr": data.get("snr"),
-                }
-            )
+            else:
+                est_m = node.model.estimate()
+                try:
+                    arrival = est_m.to_conductor_time(
+                        float(data["arrivalPerfMs"]) / 1000.0
+                    ) if est_m is not None else None
+                except (KeyError, ValueError, TypeError):
+                    arrival = None
+                if arrival is not None:
+                    result = {
+                        "tofMs": (arrival - pend["t_emit"]) * 1000.0,
+                        "peak": data.get("peak"),
+                        "snr": data.get("snr"),
+                    }
+            if waiter is not None and not waiter.done():
+                waiter.set_result(result)
 
     async def handle_control_ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=20.0)
@@ -1067,6 +1295,8 @@ class Conductor:
             self.dispatch(self._transport_beep())
         elif cmd == "measure":
             asyncio.create_task(self._measure_one(str(data.get("speakerId") or "")))
+        elif cmd == "calibrate":
+            asyncio.create_task(self._measure_all())
         elif cmd == "resync":
             self.request_burst(4.0)
             await self.toast("Resync burst running on all nodes.")

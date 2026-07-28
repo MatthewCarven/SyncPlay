@@ -1,10 +1,16 @@
 # Phase 1 plan — mic-based auto-nudge (time-of-flight per node)
 
-Status: **steps 1–2 of 4 shipped** (see the commit ladder below), both verified
-without a real mic — the acoustic loop is unproven on hardware and the fleet is
-still gated on HTTPS. Steps 3–4 are the remaining work. Obeys the house rule:
-additive, observable, revertible, one commit per sub-step, `git revert` always
-an exit.
+Status: **steps 1–3 of 4 shipped** (see the commit ladder below). All three were
+verified without a real mic — the arithmetic and the orchestration are proven,
+**the acoustic loop is not**. Step 4 (apply) is the remaining work, and it is
+deliberately last: proposals you can read are safe, proposals that apply
+themselves are not. Obeys the house rule: additive, observable, revertible, one
+commit per sub-step, `git revert` always an exit.
+
+**No HTTPS needed to finish this on your own machine.** `localhost` is already a
+secure context, so the conductor box can be the calibration mic today — and its
+clock *is* the reference clock, so it's the most accurate mic node available.
+HTTPS is only required to put the mic on a *phone*.
 
 ## Goal
 
@@ -86,8 +92,17 @@ first, flip HTTPS on for the fleet.
    the mic-node → ToF readout on control. Verified sans real mic (sample-exact
    correlator, exact ToF round-trip math, capture worklet loads, command wiring).
    Real acoustic loop + HTTPS pending on hardware.
-3. Sequence all nodes; compute relative nudges; show proposed values on control.
+3. **[DONE 2026-07-27]** Sequence all nodes; compute relative nudges; show
+   proposed values on control. `CAL_REPS` chirps per speaker, one speaker at a
+   time, `plan_nudges()` medians the reps and aligns everyone to the latest
+   arrival. Read-only: the table proposes, nothing applies. Verified by
+   simulated nodes answering `measureArm`/`measureEmit` with planted ToFs — the
+   proposals came back as the planted differences, with a constant 137 ms mic
+   latency cancelling exactly as the theory says it must. Real acoustics still
+   pending on hardware.
 4. Apply → set nudges via the existing path. Persisted, revertible. Ship.
+   Cheap: the control page can just fire the existing per-node `nudge` command
+   for each accepted proposal, so no new server surface is needed.
 
 ## Risks / unknowns to watch
 

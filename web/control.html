@@ -169,6 +169,25 @@
       <button id="measureBtn" title="emit a chirp on a speaker, cross-correlate it at the mic — stop playback first">📏 measure ToF (first speaker → mic)</button>
       <span id="measureOut" class="calOut">—</span>
     </div>
+    <div class="calTools">
+      <button id="calibrateBtn" title="sweep every speaker in turn and propose a nudge for each — measures only, applies nothing">📐 calibrate all</button>
+      <span id="calProgress" class="calOut"></span>
+    </div>
+    <div id="calResult" style="display:none; margin-top:12px; overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th>speaker</th>
+          <th class="num" title="median time-of-flight to the mic across reps">tof ms</th>
+          <th class="num" title="spread across reps — tight means trustworthy">±</th>
+          <th class="num" title="best correlation peak (0..1) and SNR">peak/snr</th>
+          <th class="num">reps</th>
+          <th class="num">nudge now</th>
+          <th class="num">proposed</th>
+        </tr></thead>
+        <tbody id="calRows"></tbody>
+      </table>
+      <div class="pill" id="calNote" style="margin-top:8px"></div>
+    </div>
   </div>
 
   <h2>MESH TRUTH <span class="pill">node↔node measured vs star-implied — the mismatch is your real sync error</span></h2>
