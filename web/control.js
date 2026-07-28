@@ -144,7 +144,11 @@ function renderNodeTable() {
       <td class="num">${fmt(n.skewPpm, 1)}</td>
       <td class="num"${ratePpm}>${err}</td>
       ${posCellFor(n)}
-      <td class="num hideSm">${n.nUsed}/${n.nSamples}</td>
+      <td class="num hideSm">${n.nUsed}/${n.nSamples}${
+        n.pingBoost > 1.05
+          ? ` <span class="boost" title="pinged ${n.pingBoost.toFixed(1)}x harder — this node discards most of its exchanges">${n.pingBoost.toFixed(1)}×</span>`
+          : ""
+      }</td>
       <td class="num"><input class="nudge" type="number" step="5" value="${n.nudgeMs}"
             onchange="setNudge('${n.id}', this.value); this.blur()"></td>
       <td><input class="volSlider" type="range" min="0" max="100" value="${n.volume ?? 80}"

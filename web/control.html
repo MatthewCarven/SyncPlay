@@ -29,6 +29,7 @@
   button.primary { background: var(--accent); color: #04120a; font-weight: 700; border: 0; }
   #nowLine { flex: 1 1 100%; color: var(--dim); padding-top: 6px; }
   #nowLine b { color: var(--text); }
+  .boost { color: var(--accent); font-size: .68rem; letter-spacing: .04em; }
   #posHit { flex: 1 1 100%; padding: 7px 0; cursor: pointer; }
   #posBar { height: 8px; background: var(--edge); border-radius: 4px; overflow: hidden; }
   #posFill { height: 100%; width: 0; background: var(--accent); transition: width .3s linear; }
@@ -141,7 +142,7 @@
         <th>node</th><th class="num">offset ms</th><th class="num">best rtt</th>
         <th class="num">drift ppm</th><th class="num" title="live playback position error vs the conductor's ideal timeline">err ms</th>
         <th title="where this node actually is in the song (read-only)">position</th>
-        <th class="num hideSm">samples</th>
+        <th class="num hideSm" title="usable / total in the window — the model runs on the usable ones">samples</th>
         <th class="num">nudge ms</th><th>vol</th><th>state</th>
       </tr></thead>
       <tbody id="nodeRows"></tbody>

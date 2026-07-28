@@ -617,3 +617,69 @@ Walked all ten states through the real `renderActivity` against a fake DOM
 rather than eyeballing them in a browser: idle, unknown-size transfer, download
 with %, armed+downloading, armed+decoding, armed alone, playing, playing +
 prefetch, playing + decoding next, stopped.
+
+---
+
+## 2026-07-28 (evening) — adaptive ping cadence
+
+**Prompt:** the control page, mid-song, four nodes. The number that mattered
+wasn't `err`, it was **samples**:
+
+| node    | n_used / n_samples | survival |
+|---------|--------------------|----------|
+| Laptop1 | 723/726            | 99.6%    |
+| pc      | 545/726            | 75%      |
+| phone   | 84/729             | 11.5%    |
+| tablet  | 39/726             | 5.4%     |
+
+The tablet's window is **not** starved — it holds as many samples as the laptop.
+`filter_best` is discarding 95% of them, correctly: its RTT tail is long enough
+that almost nothing lands near best. So the model fits on a twentieth of the
+evidence for identical traffic.
+
+**This corrects an earlier diagnosis in this log.** On 2026-07-28 morning I
+wrote that `filter_best`'s 2 ms floor made the gate too *generous* for slow
+nodes. In ratio terms it is (1.8× best for the tablet), but the observed tail is
+so long that the gate still cuts 95%. The tablet doesn't need a different
+filter; it needs more pings, because only one in twenty is usable. The
+"re-tune filter_best" TODO item should be read with that in mind.
+
+**Shipped**
+- `ping_boost(n_used, n_samples)` — reciprocal of the survival rate, so a node
+  needs 1/survival times the packets to end up with what a perfect link gets.
+  Clamped at `PING_BOOST_MAX = 4.0`, and the clamp is the honest part: you can't
+  ping a bad link into being a good one, and a node dropping 95% is telling you
+  its radio is busy — more traffic past some point is just more queueing, which
+  worsens the very tail that caused the problem. `PING_JUDGE_MIN = 40` samples
+  before the rate means anything, so a bad first second can't lock in a boost.
+- `boost_count` / `boost_interval` — sqrt each, so the product is exactly the
+  boost while buying as much *spread* as depth. Splitting matters: all-depth
+  gets more samples from the same instant, which is the failure we're escaping
+  (a burst inside one bad power-save window is uniformly bad however big);
+  all-frequency thins each burst until min-RTT filtering has nothing to choose.
+- Recomputed every loop cycle, so it relaxes the moment a link does. This is a
+  response to conditions, not a label on a device.
+- `_note_boost` logs on quarter-steps (no chatter at a threshold, but a
+  degrading or recovering link leaves a trail readable against the sync
+  numbers). `pingBoost` in the snapshot; control tags the samples cell.
+
+**Tests** — 106 passing, up from 85. `tests/test_ping_cadence.py` uses the four
+real fleet numbers above as fixtures, so the tuning is anchored to a room that
+exists, and pins the limits: ceiling, floor, monotonicity in survival, the
+young-node guard, the sqrt split conserving the boost, the interval floor, and
+a stated worst-case traffic bound (6 pings / 2.5 s, under 3/s).
+
+**Smoke-tested** two simulated nodes with the observed survival rates through
+the real `_ping_loop`, steady state after the join burst: laptop 0.45 pings/s at
+1.00×, tablet 1.95/s at 4.00×. Usable-sample ratio between them moves from
+0.05× to 0.23× — the tablet still gets less evidence than the laptop, which is
+the honest outcome, but four times more than before.
+
+**Sandbox note for future sessions.** The Linux sandbox has only Python 3.10,
+where `asyncio.TimeoutError` is *not* the builtin `TimeoutError`, so
+`_ping_loop`'s `except TimeoutError` doesn't catch and the loop exits after one
+cycle. `pyproject.toml` correctly requires >=3.11 and the real conductor runs
+3.14, so this is an artifact of the test environment, not a bug — but any async
+smoke test run here must shim `asyncio.wait_for` to re-raise the builtin, or it
+will silently measure one iteration and lie about the result. The first run of
+this feature's smoke test did exactly that and reported a 1.16× ratio.

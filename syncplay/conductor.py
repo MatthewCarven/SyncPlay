@@ -64,6 +64,11 @@ INTERVAL_PLAYING = 5.0
 INTERVAL_IDLE = 2.0
 INTERVAL_BURSTING = 1.0
 
+# --- adaptive cadence: pay for evidence, not for packets --------------------
+PING_BOOST_MAX = 4.0    # ceiling on extra traffic for a node that discards a lot
+PING_JUDGE_MIN = 40     # samples before a node's survival rate means anything
+PING_INTERVAL_MIN = 0.5  # never spin the loop faster than this, whatever the boost
+
 
 def now() -> float:
     """The conductor's reference clock (seconds). Everyone syncs to this."""
@@ -95,6 +100,55 @@ def _clean_skew(v) -> Optional[float]:
     if not math.isfinite(s) or abs(s) > MAX_PERSISTED_SKEW:
         return None
     return s
+
+
+def ping_boost(n_used: int, n_samples: int) -> float:
+    """How much extra ping traffic a node has earned. 1.0 means none.
+
+    What the clock model actually runs on is ``n_used`` — the samples that
+    survived the RTT filter — not ``n_samples``. Two nodes pinged at the same
+    rate can therefore end up with wildly different amounts of evidence: a
+    quiet wired node keeps ~100% of its exchanges, while a tablet whose Wi-Fi
+    radio parks between beacons has a long enough RTT tail that ~95% of its
+    pings are (correctly) discarded. Same traffic, a twentieth of the data.
+
+    So scale by the reciprocal of the survival rate: to end up with what a
+    perfect link gets, you need 1/survival times the packets.
+
+    The clamp is the honest part. You cannot ping a bad link into being a good
+    one, and a node dropping 95% is telling you its radio is already busy —
+    past some point extra traffic is just more queueing, which makes the very
+    tail that caused the problem worse. ``PING_BOOST_MAX`` is where we stop
+    arguing with physics. A node too young to have a meaningful survival rate
+    is left alone, so a bad first second can't lock in a permanent boost.
+    """
+    if n_samples < PING_JUDGE_MIN:
+        return 1.0
+    if n_used <= 0:
+        return PING_BOOST_MAX
+    return max(1.0, min(PING_BOOST_MAX, n_samples / n_used))
+
+
+def boost_count(count: int, boost: float) -> int:
+    """Half of a boost, spent on burst depth."""
+    if boost <= 1.0:
+        return count
+    return max(1, round(count * math.sqrt(boost)))
+
+
+def boost_interval(interval: float, boost: float) -> float:
+    """The other half, spent on burst frequency.
+
+    The split matters. Pouring a whole boost into burst *size* gets more samples
+    from the same instant, which is exactly the failure we're escaping — a burst
+    landing inside one bad Wi-Fi power-save window is uniformly bad however many
+    pings it holds. Pouring it all into *frequency* thins each burst until
+    min-RTT filtering has nothing left to choose between. A square root each way
+    makes the product exactly ``boost`` while buying as much spread as depth.
+    """
+    if boost <= 1.0:
+        return interval
+    return max(PING_INTERVAL_MIN, interval / math.sqrt(boost))
 
 
 def plan_start(playing_now: bool, loaded: List[bool]) -> Tuple[bool, float]:
@@ -233,6 +287,7 @@ class Node:
         self.sync_err_ms: Optional[float] = None  # last steer error it reported
         self.play_rate: Optional[float] = None  # its current servo playback rate
         self.burst_until = 0.0
+        self.ping_boost = 1.0  # live cadence multiplier, for the control page
         self.kick = asyncio.Event()
         self.ping_task: Optional[asyncio.Task] = None
 
@@ -306,6 +361,7 @@ class Node:
             "nUsed": 0,
             "nSamples": len(self.model),
             "spanS": 0.0,
+            "pingBoost": self.ping_boost,
         }
         if est is not None:
             d.update(
@@ -633,17 +689,39 @@ class Conductor:
                 count, spacing = BURST_GAP
             else:
                 count, spacing = BURST_PLAYING
-            await self._burst(node, count, spacing)
-            interval = (
+            # A node that discards most of its exchanges has earned more of
+            # them. Recomputed every cycle, so it relaxes the moment the link
+            # does — this is a response to conditions, not a label on a device.
+            est = node.model.estimate()
+            boost = ping_boost(est.n_used, est.n_samples) if est is not None else 1.0
+            self._note_boost(node, boost)
+
+            await self._burst(node, boost_count(count, boost), spacing)
+            interval = boost_interval(
                 INTERVAL_BURSTING
                 if node.burst_until > now()
-                else (INTERVAL_PLAYING if self.playing else INTERVAL_IDLE)
+                else (INTERVAL_PLAYING if self.playing else INTERVAL_IDLE),
+                boost,
             )
             try:
                 await asyncio.wait_for(node.kick.wait(), timeout=interval)
                 node.kick.clear()
             except TimeoutError:
                 pass
+
+    def _note_boost(self, node: Node, boost: float) -> None:
+        """Record the live boost, and say so when it moves meaningfully.
+
+        Logged on a quarter-step so a node hovering at a threshold can't chatter,
+        but a link genuinely degrading or recovering leaves a trail you can read
+        against the sync numbers afterwards.
+        """
+        if round(boost * 4) != round(node.ping_boost * 4):
+            log.info(
+                "cadence: %s ping boost %.2fx -> %.2fx", node.name,
+                node.ping_boost, boost,
+            )
+        node.ping_boost = boost
 
     async def _burst(self, node: Node, count: int, spacing: float) -> None:
         for _ in range(count):

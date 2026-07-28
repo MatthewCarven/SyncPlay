@@ -82,6 +82,15 @@ flam — then play something.
   Only measured skews are banked, never an inherited one, so a bad reading
   can't echo forward; an unreadable value falls back to a cold start.
 - During playback → 3 pings / 5 s (a few hundred bytes; inaudible in every sense).
+- **Adaptive cadence.** The model runs on the samples that *survive* the RTT
+  filter, not the ones we sent, and survival varies enormously: a wired node
+  keeps ~100%, a tablet whose Wi-Fi radio parks between beacons keeps ~5%. Same
+  traffic, a twentieth of the evidence. So each node's burst size and frequency
+  are scaled by the reciprocal of its survival rate — half into depth, half into
+  spread, capped at 4×. The cap is the honest bit: you can't ping a bad link
+  into being a good one, and a node dropping 95% is telling you its radio is
+  already busy. The **samples** column on the control page shows usable/total,
+  with a `4.0×` tag on any node currently being pinged harder.
 - Song gap / manual **⇄ resync** → 10-ping bursts.
 - Per-node **nudge** (ms, on the control page) compensates residual speaker/DAC
   latency: if one device sounds late, give it a negative nudge. Per-node

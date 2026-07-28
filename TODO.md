@@ -6,6 +6,13 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] Adaptive ping cadence (2026-07-28) — burst size and frequency now scale
+  with each node's *sample survival rate* (`n_used / n_samples`), because the
+  clock model runs on what survives the RTT filter, not on what we sent. Split
+  sqrt/sqrt between depth and spread, capped at 4×, with a young-node guard so
+  a bad first second can't lock in a boost. Observed on the real fleet: laptop
+  99.6% survival (no boost), pc 75% (1.33×), phone 11.5% and tablet 5.4% (both
+  capped). Control page tags boosted nodes; conductor logs every change.
 - [x] Armed cold start with a synced countdown (2026-07-28) — starting from a
   standstill with an undecoded track now broadcasts a countdown before playback
   and holds the load gate 20 s instead of 12. `plan_start()` is pure and
