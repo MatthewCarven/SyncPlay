@@ -103,6 +103,23 @@ the player audio path only when unavoidable, one commit per feature so
   - No HTTPS needed for that: `localhost` is a secure context, so the conductor
     box can be the mic. HTTPS is only for putting the mic on a phone.
 
+- [ ] **Settle what the tablet's `err` actually is** (one minute of watching,
+      then either a one-field change or nothing)
+  - Observed 2026-07-28 mid-song: tablet `err` +6.5 ms while laptop/pc/phone
+    all sat within ±0.5 ms. Sign convention in `onSteer` is `+ = we're ahead`,
+    so it was playing early. Its nudge was 0 at the time.
+  - Two very different causes produce that, and one screenshot can't separate
+    them. **Parks at +6.5** → constant output latency the `getOutputTimestamp`
+    mapping isn't catching; fix is a nudge. **Swings through zero to −5 or so**
+    → its offset estimate was wobbling on 39 surviving samples out of 726 and
+    the servo was chasing a moving reference; fix was the adaptive cadence, and
+    a nudge would be actively wrong because you'd be biasing against a number
+    that averages to zero.
+  - The adaptive cadence (shipped same day) may well have already fixed the
+    second case, so **re-measure before concluding anything** — the +6.5 was
+    recorded at 1.00× cadence, which no longer exists for that node.
+  - Cheapest possible test: watch that one cell for a minute.
+
 - [ ] **Spread the join burst across more than one radio window** (partly
       mitigated by the armed cold start; still open for mid-song joins)
   - `BURST_JOIN = (16, 0.06)` puts every join sample inside a single ~1 s
