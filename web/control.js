@@ -24,7 +24,7 @@ function connect() {
       micLevels.set(msg.nodeId, { rms: msg.rms, at: performance.now() });
       if (snap) renderCalibration();   // faster than the 1 Hz snapshot: lively meter
     }
-    else if (msg.type === "loadProgress") setNodePill(msg.nodeId, msg.pct, msg.done);
+    else if (msg.type === "loadProgress") setNodePill(msg.nodeId, msg.pct, msg.done, msg.decoding);
     else if (msg.type === "measureToF") showMeasure(msg);
     else if (msg.type === "calibrateProgress") showCalProgress(msg);
     else if (msg.type === "calibrateResult") showCalResult(msg);
@@ -130,8 +130,14 @@ function renderMesh() {
 
 function renderNodeTable() {
   const rows = snap.nodes.map((n) => {
-    const dl = n.loadPct !== null && n.loadPct !== undefined;  // mid-download
+    // Decode outranks download: loadPct sits at 100 for the whole decode, so
+    // testing it first would report "downloading" through the longer half of
+    // the wait. Elapsed seconds, because decodeAudioData has no percentage to
+    // give and an invented one would be worse than an honest counter.
+    const dec = n.decodingS !== null && n.decodingS !== undefined;
+    const dl = !dec && n.loadPct !== null && n.loadPct !== undefined;
     const state = n.playing ? "♪ playing"
+                : dec ? `⚙ decoding ${n.decodingS.toFixed(1)}s`
                 : dl ? `⬇ ${n.loadPct}%`
                 : (n.loadedCurrent ? "ready" : (n.connected ? "idle" : "gone"));
     const err = n.playing ? fmt(n.syncErrMs, 1) : "—";
@@ -471,18 +477,27 @@ function posCellFor(n) {
          `<span class="miniTime">${mmss(pos)}</span></td>`;
 }
 
-// Live download-% pill, faster than the 1 Hz snapshot: paint the node's status
-// cell directly as progress relays in. The snapshot stays the source of truth for
+// Live load pill, faster than the 1 Hz snapshot: paint the node's status cell
+// directly as progress relays in. The snapshot stays the source of truth for
 // idle/ready/playing and overwrites this on its next tick — we only ever write the
-// ⬇% and never mask a node that's already playing (its background prefetch of the
-// next track mustn't clobber "♪ playing"). `done` retires it the instant decode
-// finishes, so it doesn't linger at 99% until the next snapshot.
-function setNodePill(nodeId, pct, done) {
+// transfer states and never mask a node that's already playing (its background
+// prefetch of the next track mustn't clobber "♪ playing"). `done` retires it the
+// instant decode finishes, so it doesn't linger until the next snapshot.
+//
+// `decoding` flips the phase the moment the last byte lands. The seconds are left
+// at 0.0 here on purpose: this path fires on relay, not on a clock, so it can't
+// count. The 1 Hz snapshot takes over and ticks it — this only has to stop the
+// cell claiming to still be downloading.
+const PILL_LOAD_PREFIXES = ["⬇", "⚙"];
+const isLoadPill = (s) => PILL_LOAD_PREFIXES.some((p) => s.startsWith(p));
+
+function setNodePill(nodeId, pct, done, decoding) {
   for (const row of document.querySelectorAll("#nodeRows tr")) {
     if (row.dataset.node !== String(nodeId)) continue;
     const cell = row.querySelector(".nodeState");
     if (!cell || cell.textContent.trim() === "♪ playing") return;
-    if (done) { if (cell.textContent.trim().startsWith("⬇")) cell.textContent = "ready"; }
+    if (done) { if (isLoadPill(cell.textContent.trim())) cell.textContent = "ready"; }
+    else if (decoding) cell.textContent = "⚙ decoding 0.0s";
     else cell.textContent = `⬇ ${pct}%`;
     return;
   }

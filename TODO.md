@@ -6,6 +6,17 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] Real decode phase on the control page (2026-08-02) — the node pill froze
+  on `⬇ 100%` for the whole decode, which is the longer half of a cold start on
+  a tablet and the half the operator most wants to see moving. `decodeAudioData`
+  is a single opaque promise with no progress events, so there is no percentage
+  to be had; the conductor stamps when the last byte lands and reports **elapsed
+  seconds** instead — honest, and it answers the only question a bar is asked
+  (moving, or hung). Decode outranks download in the pill because `loadPct`
+  stays at 100 throughout. Conductor + control page only: **no player-side
+  change, so no fleet reload.** Every exit from the phase is tested (decoded,
+  failed, retargeted, reconnected) because a timer that never stops is worse
+  than the frozen 100% it replaced.
 - [x] Adaptive ping cadence (2026-07-28) — burst size and frequency now scale
   with each node's *sample survival rate* (`n_used / n_samples`), because the
   clock model runs on what survives the RTT filter, not on what we sent. Split
@@ -103,6 +114,48 @@ the player audio path only when unavoidable, one commit per feature so
   - No HTTPS needed for that: `localhost` is a secure context, so the conductor
     box can be the mic. HTTPS is only for putting the mic on a phone.
 
+- [ ] **A straggler must not hold up the fleet** (the actual party bug; fell out
+      of the static/dynamic discussion below and survives it)
+  - `_transport_play` waits for **every** connected node to decode, up to
+    `LOAD_GATE_TIMEOUT` (12 s) or `LOAD_GATE_COLD` (20 s). And `plan_start` says
+    `cold = not playing_now and not all(loaded)`, so **one** slow node also
+    forces a 6 s armed countdown on everyone else.
+  - So one phone on bad Wi-Fi, pulling 30 MB slowly, can delay the whole room's
+    song start by twenty seconds. Nothing to do with clocks — pure gate policy.
+  - Shape: start when a quorum is ready (all-but-N, or a short grace period past
+    the first-ready), and let the rest arrive via the existing `_catchup` path,
+    which is exactly what it is for. Needs no mobility concept, no new state, no
+    player change.
+  - Watch the interaction with the cold-start countdown: the armed window is
+    also the calibration window, so shortening it for a straggler trades a
+    little clock convergence for a lot less waiting. Probably worth it; measure
+    closure before and after rather than assuming.
+
+- [ ] **Modular sync engine, switchable while stopped** (scoped 2026-08-02,
+      nothing built)
+  - Full scope in [SYNC_ENGINE_PLAN.md](SYNC_ENGINE_PLAN.md). Verdict: possible,
+    and the conductor side is cheap — `ClockEstimate` is already most of the
+    interface (3 methods, 8 fields, 17 `estimate()` sites, **all 17 already
+    guard against None** because that's the fresh-join state).
+  - The boundary has to sit **above the wire**: an engine may change how a
+    node-clock timestamp is computed, never what one means. Hold that and
+    `player.js` never learns an engine exists, so the swap is hot. Break it (a
+    swappable *servo*) and a swap costs a fleet reload.
+  - Seam should be a `SyncEngine` owned by the Conductor, not a model owned by
+    each Node — a mesh-consensus engine needs every node's samples at once, and
+    that shape is expensive to retrofit across 17 call sites.
+  - **Ordering matters:** the estimate-quality gate (below) must land *before*
+    the swap button. `Node.loaded` is decoupled from the model, so post-swap
+    `plan_start` sees a warm fleet, skips `request_burst`, and fires play 1.8 s
+    later into empty models — `self.playing` set, nobody told to play, and no
+    signal until auto-advance a whole track later.
+  - Payoff isn't modularity, it's that the scoreboard already exists: triangle
+    closure is an independent referee (and survives a swap — the pair models hold
+    no conductor-clock data), `err ms` is the servo's own opinion, and
+    `test_timesync.py` is a conformance suite in disguise. First second engine
+    should be `flat` (v1 median-only, no drift) as the *control* — you already
+    know what it must do to the numbers.
+
 - [ ] **Settle what the tablet's `err` actually is** (one minute of watching,
       then either a one-field change or nothing)
   - Observed 2026-07-28 mid-song: tablet `err` +6.5 ms while laptop/pc/phone
@@ -156,6 +209,72 @@ the player audio path only when unavoidable, one commit per feature so
     ClockModel window)
   - offset-residual RMS vs the regression line = live measurement-noise
     estimate ("how much should I trust this node's numbers")
+  - **±rtt/2 as a single trust column.** Path asymmetry is bounded by the round
+    trip (`|d_out - d_ret| <= rtt`), so every sample carries a certificate of its
+    own worst-case error: `|offset error| <= rtt/2`. That collapses the whole
+    row into one honest number per node — "good to ±0.4 ms" — and it is the
+    number that would have settled the tablet's +6.5 ms at a glance instead of
+    leaving two competing hypotheses. It is also *why* min-RTT filtering is
+    principled rather than a heuristic: it selects for the tightest bound.
+
+- [ ] **Three small fixes surfaced while scoping the sync engine** (2026-08-02,
+      independent of it and of each other)
+  - `_transport_play` logs `"nobody"` when no node could be timed, but doesn't
+    toast — unlike the no-load path directly above it, which does. The one
+    failure mode that leaves state lying is the one with no visible signal.
+  - `_measure_one` isn't gated by `_calibrating`. A manual 📏 during a sweep
+    overwrites `_measure_pending` with no in-flight check, so the sweep's rep
+    waits out `MEASURE_TIMEOUT` and is dropped — which is exactly what the flag
+    exists to prevent. `_measure_all` guards itself; `_measure_one` doesn't.
+  - `_state["skews"]` is write-only. `nudges` and `eqs` both delete their entry
+    when cleared; skews never do, so one bad persisted value outlives every
+    session and can't be cleared from memory. `_clean_skew` only filters at load.
+  - `remember_skew` will bank a slope fitted from a node *moving* — someone
+    walking to the patio is a clean-looking trend over a 600 s window, and
+    `MAX_PERSISTED_SKEW` (500 ppm) is far too loose to catch it. It then seeds
+    that node's next session. Wants a minimum fit quality (residual RMS, or R²)
+    before banking, which is strictly better than a movement flag would have
+    been because it catches *every* bad fit, not just the moving kind.
+  - `loadError` leaves `load_track`/`load_pct` set, so a node that failed to
+    decode shows a stuck `⬇ 87%` until its next transfer. (The decode timer is
+    already cleared on this path as of 2026-08-02; these two were left alone
+    deliberately so the fix is its own commit.)
+
+## Considered and dropped
+
+- **Per-node static / dynamic / auto movement flag** (2026-08-02) — the idea was
+  that only stationary nodes should feed "core timing data" and moving ones just
+  follow. Dropped, because the premise doesn't hold here: this is a **star**, not
+  a consensus network. Every node has its own `ClockModel`, the reference clock
+  is the conductor's `perf_counter()` and is not derived from the fleet at all,
+  so a wandering node's bad samples already cannot reach anyone else's timing.
+  There was no centre to protect.
+  - Two supporting facts worth keeping. **RTT is not location data:** radio
+    propagation over 10 m is 33 ns, while the RTT swings are milliseconds — what
+    actually rises with distance is retransmissions, so "walked out front" and
+    "someone started a video call" look identical. And **error is bounded by
+    `rtt/2`**, so sample quality is already measured directly; a mobility label
+    would have been a worse proxy for a number we hold exactly.
+  - The alternative — move the alignment centre toward the outlier — is worse,
+    and geometrically so. Sound is 3 ms/m and one delay per speaker gives exactly
+    **one** point where everything arrives together. Aligning for someone 12 m out
+    the front door moves the sweet spot off the crowd by the same amount; a 5 m
+    geometry difference injects ~15 ms of smear where people are actually
+    standing. It spends the crowd's alignment on the person who left the party.
+  - Moving the *timing* centre is a pure loss for a different reason: the
+    reference clock is arbitrary, error is relative, and re-choosing the origin
+    toward a noisy node cannot shrink its error relative to the group — it only
+    makes the good nodes express themselves through a worse reference. (The one
+    legitimate version, electing a better-connected master, doesn't apply: the
+    conductor host already sits at ~0.2 ms RTT.)
+  - **What survived:** the straggler load gate and the phantom-skew fix above,
+    plus the ±rtt/2 dashboard column. All three are smaller than the feature was
+    and none of them need a mobility concept.
+  - **Still open, and a different question entirely:** *where* the acoustic sweet
+    spot should sit. That is a calibration question — `plan_nudges` already aligns
+    to the latest arrival at the mic position, so "the centre of the party" is
+    just where you put the mic. Re-running calibration from where people actually
+    are is the real version of the idea that started this.
 
 ## Later / maybe
 - Shuffle + repeat modes. Both are now small: shuffle = seed the queue from a

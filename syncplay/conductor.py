@@ -283,6 +283,12 @@ class Node:
         self.loaded: Set[str] = set()  # track ids decoded and ready this page-life
         self.load_track: Optional[str] = None  # track id currently downloading (pre-decode)
         self.load_pct: Optional[int] = None  # its byte-download %, for the control pill
+        # Conductor time the byte transfer finished, i.e. when decodeAudioData
+        # took over. decodeAudioData is a single opaque promise — no progress
+        # events exist to relay — so the only honest thing to show is how long
+        # it has been going, and the conductor can time that without the node
+        # saying anything it isn't already saying. None whenever not decoding.
+        self.decode_since: Optional[float] = None
         self.playing_track: Optional[str] = None  # as reported by the node
         self.sync_err_ms: Optional[float] = None  # last steer error it reported
         self.play_rate: Optional[float] = None  # its current servo playback rate
@@ -300,6 +306,7 @@ class Node:
         self.loaded.clear()
         self.load_track = None
         self.load_pct = None
+        self.decode_since = None
         self.playing_track = None
         self.sync_err_ms = None
         self.play_rate = None
@@ -347,12 +354,23 @@ class Node:
             "ratePpm": (self.play_rate - 1.0) * 1e6 if self.play_rate else None,
             "playing": self.playing_track,
             "loadedCurrent": bool(current_track and current_track in self.loaded),
-            # Non-null only while a not-yet-decoded track is streaming in — the
-            # control page shows it in the node's status pill. Cleared on decode.
+            # Non-null from the first byte until the node reports the track
+            # decoded — the control page shows it in the node's status pill.
+            # It reaches 100 well before the wait is over, so a reader must
+            # prefer decodingS below whenever that is set.
             "loadPct": (
                 self.load_pct
                 if (self.load_track is not None and self.load_track not in self.loaded)
                 else None
+            ),
+            # Seconds spent decoding so far, or None if this node isn't decoding.
+            # Elapsed rather than a percentage on purpose: there is no progress
+            # to be had out of decodeAudioData, and an estimated bar would be a
+            # guess wearing a measurement's clothes. A counter that ticks is
+            # enough to answer the only question being asked of it — is this
+            # moving, or has it hung.
+            "decodingS": (
+                None if self.decode_since is None else now() - self.decode_since
             ),
             "offsetMs": None,
             "lastRttMs": None,
@@ -1277,11 +1295,23 @@ class Conductor:
                 pct = int(data.get("pct"))
             except (TypeError, ValueError):
                 return
-            node.load_track = tid
+            if node.load_track != tid:  # a different track: start its clock clean
+                node.load_track = tid
+                node.decode_since = None
             node.load_pct = max(0, min(100, pct))
+            # 100% means the bytes are here, not that the wait is over — an 85 MB
+            # decode still has to happen, and on a tablet that is the longer half.
+            # Stamping it here is what stops the pill freezing on "100%" for the
+            # part of the wait the operator most wants to see moving.
+            if node.load_pct >= 100 and node.decode_since is None:
+                node.decode_since = now()
             if self.control_sockets:
                 await self._broadcast_control(
-                    {"type": "loadProgress", "nodeId": node.client_id, "pct": node.load_pct}
+                    {"type": "loadProgress", "nodeId": node.client_id,
+                     "pct": node.load_pct,
+                     # Flip the pill's phase at once rather than up to a second
+                     # later, the same reason `done` is pushed rather than waited for.
+                     "decoding": node.decode_since is not None}
                 )
         elif kind == "loaded":
             tid = str(data.get("trackId"))
@@ -1289,6 +1319,7 @@ class Conductor:
             if node.load_track == tid:  # decode done: retire the progress pill
                 node.load_track = None
                 node.load_pct = None
+                node.decode_since = None
                 if self.control_sockets:  # flip the pill off ⬇% at once, not next snapshot
                     await self._broadcast_control(
                         {"type": "loadProgress", "nodeId": node.client_id, "done": True}
@@ -1304,6 +1335,12 @@ class Conductor:
             if self.playing is not None and self.playing.track.id == tid:
                 asyncio.create_task(self._catchup(node, tid))
         elif kind == "loadError":
+            # A decode that failed is a decode that stopped, so the timer must
+            # stop too — otherwise the pill counts up forever on a node that
+            # gave up minutes ago, which is worse than the frozen 100% it
+            # replaced. (load_track/load_pct are left alone here: they leak on
+            # this path already, and that is a separate fix with its own commit.)
+            node.decode_since = None
             await self.toast(
                 f"{node.name} failed to decode {data.get('trackId')}: {data.get('error')}"
             )
