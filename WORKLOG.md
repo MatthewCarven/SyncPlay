@@ -683,3 +683,61 @@ cycle. `pyproject.toml` correctly requires >=3.11 and the real conductor runs
 smoke test run here must shim `asyncio.wait_for` to re-raise the builtin, or it
 will silently measure one iteration and lie about the result. The first run of
 this feature's smoke test did exactly that and reported a 1.16× ratio.
+
+## 2026-08-02 — span beats count for the skew fit
+
+No code. One number that changes how the idle time before a party should be
+read, written down because it existed only in a conversation.
+
+**The claim.** For the least-squares slope in `ClockModel.estimate()`, the
+standard error of the fitted skew is
+
+```
+SE(skew) = σ / sqrt( Σ (tᵢ − t̄)² )  =  σ / ( s_t · √n )
+```
+
+where `σ` is the per-sample offset noise, `s_t` the spread of the sample
+*timestamps*, and `n` the count. **Spread enters linearly; count enters as its
+square root.** Doubling the baseline halves the error; matching that with
+samples alone takes four times as many.
+
+So 20 pings spread over 3 minutes fit a better slope than 200 crammed into 10
+seconds — **5.7× better**, on a tenth of the traffic. Ten times fewer packets
+and six times less error, because the only thing a burst can't buy is time.
+
+**Why it matters here.** `min_slope_span = 30.0` and `min_slope_samples = 8`
+are both guards, but they are not equal partners: the span guard is doing most
+of the work, and the count guard is close to a formality. A node's skew
+estimate improves with *time since join* far more than with how hard we ping
+it.
+
+Matthew's habit of parking a node on the join screen for 5–10 minutes before
+hitting play turns out to sit exactly on the knee. Going from 1 minute of
+history to 10 improves the skew error about **31×** (10× the baseline, ~10× the
+samples). Past 10 minutes there is no further gain at all — `window = 600.0`
+starts evicting from the tail, so the span stops growing and the estimate
+plateaus. Five to ten minutes was arrived at by feel and is the right answer;
+fifteen buys nothing.
+
+**Playing time is calibration time too** — Matthew's observation, and it holds.
+Idle cadence is ~3.7 pings/s (`BURST_GAP` every `INTERVAL_IDLE`), playback is
+~0.57/s (`BURST_PLAYING` every `INTERVAL_PLAYING`), so a song accumulates about
+6.5× fewer samples. But it covers the *same* 600 s baseline, and baseline is the
+term that dominates: a window filled purely during playback is only ~2.6× worse
+than one filled purely idle, not 6.5×. A long playlist keeps every node's fit
+alive; nodes really do drift into better alignment as the night goes on, up to
+the window ceiling.
+
+**This is NOT an argument against the sqrt/sqrt cadence split.** Worth stating
+plainly so a future session doesn't "fix" something that isn't broken.
+`boost_interval` spreads bursts *within* a window that is already 600 s long —
+its job is decorrelating samples across Wi-Fi power-save cycles, which attacks
+the `σ` term (measurement noise). The finding above is about `s_t`, the
+baseline, which cadence cannot extend because the window length sets it. Two
+different terms of the same formula; the 2026-07-28 split stands.
+
+**Parked, deliberately doing nothing:** a client-side "calibrated for N minutes"
+readout on the player page. Display only — no gating, no policy, no colour that
+means anything. It would simply make the one quantity that most determines a
+node's skew quality visible to the person deciding when to hit play, and later
+give something to compare a precision claim against. Not scheduled.
