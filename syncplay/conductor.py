@@ -41,7 +41,14 @@ PRE_END_BURST = 2.5       # heavy resync burst starts this long before track end
 GAP_AFTER_TRACK = 0.15    # silence after a track before the next is scheduled
 LOAD_GATE_TIMEOUT = 12.0  # warm start: fleet is going, buffer already decoded
 LOAD_GATE_COLD = 20.0     # cold start: a 70 MB decode from nothing needs room
-STRAGGLER_GRACE = 4.0     # quiet period: stop waiting once nobody new is arriving
+# Quiet period before we stop waiting on a straggler, as a fraction of that
+# start's own gate — 15 s of a cold start's 20, 9 s of a warm start's 12. Tied
+# to the gate rather than fixed because the two starts are different bets: a
+# cold start has already committed the room to a wait, so patience there costs
+# little, while a warm skip interrupts music that was playing and every second
+# of silence is felt. A flat 4 s was too eager for a real tablet on a real
+# radio; this leaves the fleet time to actually arrive and still bounds it.
+STRAGGLER_GRACE_FRAC = 0.75
 ARM_SECONDS = 6.0         # visible countdown floor before a cold start
 PENDING_PING_TTL = 5.0
 MAX_QUEUE = 200           # sanity cap on the explicit play queue
@@ -178,8 +185,16 @@ def plan_start(playing_now: bool, loaded: List[bool]) -> Tuple[bool, float]:
     return cold, (LOAD_GATE_COLD if cold else LOAD_GATE_TIMEOUT)
 
 
-def hold_gate(n_ready: int, n_connected: int, quiet_for: float) -> bool:
+def hold_gate(
+    n_ready: int, n_connected: int, quiet_for: float, grace: float
+) -> bool:
     """Whether the load gate should keep waiting for the rest of the fleet.
+
+    ``grace`` is the quiet period — how long nobody new may arrive before we
+    give up on the rest. The caller derives it from that start's own gate
+    (``STRAGGLER_GRACE_FRAC``) rather than it being fixed here, so the function
+    stays a pure rule and the tuning lives with the timeouts it is scaled
+    against.
 
     The old rule was "wait for everyone, up to the timeout", which meant one
     phone on bad Wi-Fi could hold the whole room in silence for twenty seconds.
@@ -190,8 +205,8 @@ def hold_gate(n_ready: int, n_connected: int, quiet_for: float) -> bool:
     late. The cost of waiting is everybody standing in silence.
 
     So the rule is a **quiet period**, not a deadline: keep waiting while nodes
-    are still arriving, and stop once nobody new has arrived for
-    ``STRAGGLER_GRACE``. That adapts to what is actually happening, where a
+    are still arriving, and stop once nobody new has arrived for ``grace``.
+    That adapts to what is actually happening, where a
     fixed grace cannot:
 
     * A fleet that is uniformly slow arrives in dribs — someone new every second
@@ -214,7 +229,7 @@ def hold_gate(n_ready: int, n_connected: int, quiet_for: float) -> bool:
         return False  # everyone is here; nothing left to wait for
     if n_ready * 2 < n_connected:
         return True  # not a straggler — most of the room is still loading
-    return quiet_for < STRAGGLER_GRACE
+    return quiet_for < grace
 
 
 def plan_nudges(rows: Dict[str, List[dict]]) -> List[dict]:
@@ -854,6 +869,7 @@ class Conductor:
         # armed, also hold until the countdown runs out, so the number on screen
         # is the truth even if the decode beat it.
         deadline = now() + gate
+        grace = gate * STRAGGLER_GRACE_FRAC
         # `hold_gate` needs to know when the fleet last made progress, so track
         # arrivals rather than just the current count — a node dropping off must
         # not read as somebody arriving.
@@ -865,7 +881,8 @@ class Conductor:
             if n_ready > seen_ready:
                 seen_ready = n_ready
                 last_arrival = now()
-            if not hold_gate(n_ready, len(connected), now() - last_arrival):
+            if not hold_gate(n_ready, len(connected),
+                             now() - last_arrival, grace):
                 # The countdown is a promise. However ready the room turns out
                 # to be, a timer that hits zero early is a timer nobody trusts.
                 if not arm or now() >= t_arm_end:
@@ -1399,12 +1416,20 @@ class Conductor:
             if self.playing is not None and self.playing.track.id == tid:
                 asyncio.create_task(self._catchup(node, tid))
         elif kind == "loadError":
-            # A decode that failed is a decode that stopped, so the timer must
-            # stop too — otherwise the pill counts up forever on a node that
-            # gave up minutes ago, which is worse than the frozen 100% it
-            # replaced. (load_track/load_pct are left alone here: they leak on
-            # this path already, and that is a separate fix with its own commit.)
+            # A failed load must retire the whole pill, not just its timer.
+            # Leaving load_track/load_pct set was how a node that gave up
+            # minutes ago went on showing a frozen "100%" — downloaded,
+            # apparently fine, actually sitting the song out. The node is not
+            # holding this track, so it must read as not ready.
             node.decode_since = None
+            if node.load_track == str(data.get("trackId")):
+                node.load_track = None
+                node.load_pct = None
+                if self.control_sockets:
+                    await self._broadcast_control(
+                        {"type": "loadProgress", "nodeId": node.client_id,
+                         "done": True, "failed": True}
+                    )
             await self.toast(
                 f"{node.name} failed to decode {data.get('trackId')}: {data.get('error')}"
             )

@@ -815,3 +815,52 @@ constraint once the gate stops being one — so the cold-start saving is capped 
 shortening the countdown, which is a different argument (that window is also the
 calibration burst). Warm starts — ⏭ to an unprefetched track, seek, resume — have
 no countdown, so they take the full benefit.
+
+## 2026-08-02 (later still) — gate retune, and what the frozen 100% actually was
+
+**Retune.** Matthew asked for the straggler wait to be longer: cold 6 → 15 s,
+warm 4.7 → 10 s. A flat `STRAGGLER_GRACE = 4.0` was too eager for a real tablet
+on a real radio — a simulator's straggler either arrives or doesn't, but his
+arrives *late*, and 4 s of quiet was cutting a node that was still coming.
+
+The grace is now `STRAGGLER_GRACE_FRAC = 0.75` of **that start's own gate**:
+15 s of a cold start's 20, 9 s of a warm start's 12. Tied to the gate rather
+than fixed, because the two starts are different bets — a cold start has already
+committed the room to a wait, so patience is cheap there, while a warm skip
+interrupts music that was playing and every second of silence is felt.
+`hold_gate` now takes the grace as an argument instead of reading a global, so
+the rule stays pure and the tuning lives beside the timeouts it scales against.
+
+Re-measured, same scenarios: cold straggler **15.67 s** (was 6.02, originally
+20.03), warm skip **9.63 s** (was 4.66, originally 12.04). The cases that were
+already right are untouched — uniformly slow fleet 6.04 s / 4.06 s with all four
+nodes in, cached-node-plus-three-slow 6.02 s with all four. 188 tests.
+
+Honest note on the trade: the cold-start saving is now 4.3 s rather than 14, so
+most of what the gate buys has moved to the warm path — ⏭ to an unprefetched
+track, seek, resume. That is Matthew's call about his own house and his own
+tablet, and the knob is one number.
+
+**The screenshot.** Four nodes mid-song: pc, phone and laptop all playing at
+2:56 with err 0.5/0.5/0.0, and the tablet showing a frozen `100%` with `—` for
+both err and position. Downloaded, apparently fine, actually sitting the song
+out. Matthew's own guess — "I often rebalance the queue and the next file
+preload suffers because I do" — turned out to be exactly it.
+
+Every queue edit calls `_prefetch_next()`, which broadcasts a `preload`. The
+player handles that with `case "preload": loadTrack(msg.trackId, msg.url);` —
+**fire and forget, not awaited, never cancelled**. The `loading` set only
+dedupes the *same* track id, so reordering the queue several times starts
+several concurrent 30 MB fetches and several concurrent `decodeAudioData` calls,
+each yielding ~85 MB of PCM. On a tablet that is an out-of-memory decode
+rejection; `loadError` fires and the node is out of the song entirely.
+
+The frozen `100%` was a second bug on top: `loadError` cleared nothing, so
+`load_track`/`load_pct` kept their last values forever and the pill went on
+claiming a finished download. Fixed here — a failed load now retires the whole
+pill, so a node that gave up reads as not ready instead of as ready-and-idle.
+That is the display half. **The cause is still live**, laddered in TODO: one
+prefetch at a time via `AbortController`, serialised decodes as the real OOM
+guard, an `unloaded` message so `node.loaded` stops claiming buffers the player
+has evicted, and one retry on failure. Those are `player.js`, so they need a
+fleet reload and a party rather than a simulator to verify.

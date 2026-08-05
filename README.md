@@ -74,8 +74,9 @@ flam — then play something.
   *warm* (everyone already holds the buffer) and start immediately, because a
   countdown between songs in a playlist would be maddening.
 - **One straggler doesn't hold the room.** The load gate waits while nodes are
-  still *arriving* and stops once nobody new has turned up for
-  `STRAGGLER_GRACE` (4 s) — a quiet period, not a deadline. A fleet that is
+  still *arriving* and stops once nobody new has turned up for a quiet period —
+  `STRAGGLER_GRACE_FRAC` of that start's own gate, so 15 s on a cold start and
+  9 s on a warm one. A quiet period, not a deadline. A fleet that is
   merely slow arrives in a drip that keeps resetting it, so nobody gets cut; a
   single phone on a bad radio stops the drip and the song starts a few seconds
   later instead of at the 12/20 s timeout. Below half the fleet ready it waits

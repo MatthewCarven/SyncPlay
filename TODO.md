@@ -11,13 +11,15 @@ the player audio path only when unavoidable, one commit per feature so
   old rule waited the full timeout and then started **without that node anyway**.
   `hold_gate()` replaces "wait for everyone or time out" with a **quiet period** —
   keep waiting while nodes are still arriving, stop once nobody new has for
-  `STRAGGLER_GRACE` (4 s). A uniformly slow fleet arrives in a drip that keeps
+  `STRAGGLER_GRACE_FRAC` of that start's own gate (15 s cold, 9 s warm;
+  retuned up from a flat 4 s the same day, which was too eager for a real
+  tablet on a real radio). A uniformly slow fleet arrives in a drip that keeps
   resetting it and is never cut; a single straggler stops the drip. Below half
   ready it holds regardless, so a node with a cached copy can't strand the other
   three (the failure a grace measured from the *first* ready node would have had).
   The countdown remains a floor no gate may undercut. Measured against simulated
-  fleets: cold straggler 20.0 s → 6.0 s, warm skip 12.0 s → 4.7 s, uniformly slow
-  4.06 s → 4.06 s (identical, as intended). A cut node is deferred, not dropped —
+  fleets: cold straggler 20.0 s → 15.7 s, warm skip 12.0 s → 9.6 s, uniformly
+  slow 4.06 s → 4.06 s (identical, as intended). A cut node is deferred, not dropped —
   `_catchup` already owns that — and control now names who and why.
 - [x] Real decode phase on the control page (2026-08-02) — the node pill froze
   on `⬇ 100%` for the whole decode, which is the longer half of a cold start on
@@ -126,6 +128,38 @@ the player audio path only when unavoidable, one commit per feature so
     chirp has ever crossed actual air. First hardware run is the milestone.
   - No HTTPS needed for that: `localhost` is a secure context, so the conductor
     box can be the mic. HTTPS is only for putting the mic on a phone.
+
+- [ ] **Battle-harden the loader** (diagnosed 2026-08-02 from a live screenshot;
+      root cause confirmed in the code, fix not started)
+  - **Symptom.** Tablet stuck showing a frozen `100%` while the other three play
+    at 2:56, its `err` and `position` both `—`. It downloaded the file and then
+    silently sat the song out.
+  - **Root cause, and Matthew called it before the code was read:** every queue
+    edit (`queue`, `unqueue`, `queueMove`, `queueClear`, `rescan`) calls
+    `_prefetch_next()`, which broadcasts a `preload`. In `player.js` that is
+    `case "preload": loadTrack(...)` — **fire and forget, not awaited, never
+    cancelled**. The `loading` set only dedupes the *same* track id, so
+    rebalancing the queue N times starts N concurrent 30 MB fetches and N
+    concurrent `decodeAudioData` calls, each yielding ~85 MB of PCM. On a tablet
+    that is the out-of-memory path: the decode rejects, `loadError` fires, and
+    the node is out of the song entirely.
+  - **Second bug, same area:** the cache evicts down to 2 buffers
+    (`cache.delete`) without telling the conductor, so `node.loaded` can claim a
+    node holds a track it has since dropped. The gate then counts it ready and
+    it joins late via `_catchup` instead of starting with everyone.
+  - Ladder, smallest first:
+    1. ~~`loadError` leaving `load_track`/`load_pct` set~~ — done 2026-08-02.
+       That was why the pill froze at `100%` instead of reading "not ready".
+    2. **One prefetch at a time.** An `AbortController` per in-flight prefetch;
+       a `preload` for a different track cancels the old one. The *current*
+       track's load is never cancelled.
+    3. **Serialise decodes.** Never two `decodeAudioData` at once — a promise
+       chain is enough. This is the actual OOM guard and the real fix.
+    4. **`unloaded` message** on eviction, so `node.loaded` stays truthful.
+    5. **One retry on failure**, with backoff. Today a failed decode gives up
+       permanently and the node is out until the next track.
+  - Steps 2–4 are `player.js`, so they need a fleet reload, and the honest test
+    is a party rather than a simulator. Worth its own session.
 
 - [ ] **Modular sync engine, switchable while stopped** (scoped 2026-08-02,
       nothing built)
