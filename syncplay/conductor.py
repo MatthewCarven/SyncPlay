@@ -1399,8 +1399,15 @@ class Conductor:
             # decode still has to happen, and on a tablet that is the longer half.
             # Stamping it here is what stops the pill freezing on "100%" for the
             # part of the wait the operator most wants to see moving.
-            if node.load_pct >= 100 and node.decode_since is None:
-                node.decode_since = now()
+            if node.load_pct >= 100:
+                if node.decode_since is None:
+                    node.decode_since = now()
+            else:
+                # Progress went backwards, which only happens when the node
+                # retried a failed load: it is downloading again, not decoding,
+                # and a timer left running would quietly count the retry as
+                # part of a decode that already failed.
+                node.decode_since = None
             if self.control_sockets:
                 await self._broadcast_control(
                     {"type": "loadProgress", "nodeId": node.client_id,
@@ -1430,6 +1437,13 @@ class Conductor:
                     pass
             if self.playing is not None and self.playing.track.id == tid:
                 asyncio.create_task(self._catchup(node, tid))
+        elif kind == "unloaded":
+            # The node evicted a decoded buffer to stay inside its memory
+            # budget. `node.loaded` is the conductor's only view of what a node
+            # holds, and nothing else can tell us this — so believing a stale
+            # entry means the load gate counts the node ready, skips it, and it
+            # joins late through `_catchup` instead of starting with everyone.
+            node.loaded.discard(str(data.get("trackId")))
         elif kind == "loadError":
             # A failed load must retire the whole pill, not just its timer.
             # Leaving load_track/load_pct set was how a node that gave up

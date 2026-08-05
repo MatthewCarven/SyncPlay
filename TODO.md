@@ -6,6 +6,33 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] Battle-hardened the loader (2026-08-02) — all five rungs. **Symptom:** a
+  tablet frozen on `100%` while the other three played, `err` and `position`
+  both `—`; it had downloaded the file and then silently sat the song out.
+  **Cause, which Matthew called before the code was read:** every queue edit
+  runs `_prefetch_next()` → a `preload` broadcast, and the player handled that
+  with fire-and-forget `loadTrack()`. `loading` dedupes only the *same* track,
+  so N rebalances started N concurrent 30 MB fetches and N concurrent
+  `decodeAudioData` calls at ~85 MB of PCM each — five of those is ~425 MB on a
+  device with no business holding one.
+  - `preload` now carries `prefetch: true/false`. Only a guess is cancellable;
+    any newer preload supersedes it, a demand load included. A guess promoted to
+    demand stops being cancellable, so a later guess can't kill the load the
+    room is waiting on.
+  - Decodes serialise through one chain, re-checking the abort signal before
+    spending the memory. This is the actual OOM guard.
+  - `AbortError` no longer reports `loadError` — an abort is a decision, and
+    reporting it would toast a failure on every queue reorder.
+  - One retry with backoff before giving up; the conductor reads progress
+    running backwards as "downloading again" and restarts the decode clock.
+  - `unloaded` on eviction, so `node.loaded` stops claiming buffers the player
+    has dropped and the gate stops skipping a node that isn't ready.
+  - `loadError` also clears `load_track`/`load_pct` — that leak was why the pill
+    froze at `100%` instead of reading "not ready".
+  - Measured old vs new on a harness that runs the shipped functions straight
+    out of `player.js`: 5 rebalances, 5 concurrent decodes → 1; 4 overlapping
+    demand loads, 4 → 1. 29 harness checks plus 193 Python tests. **Needs a
+    fleet reload**, and the honest test is still a party.
 - [x] Straggler load gate (2026-08-02) — one phone on a bad radio could hold the
   whole room in silence for up to 20 s, and measurably bought nothing by it: the
   old rule waited the full timeout and then started **without that node anyway**.
@@ -128,44 +155,6 @@ the player audio path only when unavoidable, one commit per feature so
     chirp has ever crossed actual air. First hardware run is the milestone.
   - No HTTPS needed for that: `localhost` is a secure context, so the conductor
     box can be the mic. HTTPS is only for putting the mic on a phone.
-
-- [ ] **Battle-harden the loader** (diagnosed 2026-08-02 from a live screenshot;
-      root cause confirmed in the code, fix not started)
-  - **Symptom.** Tablet stuck showing a frozen `100%` while the other three play
-    at 2:56, its `err` and `position` both `—`. It downloaded the file and then
-    silently sat the song out.
-  - **Root cause, and Matthew called it before the code was read:** every queue
-    edit (`queue`, `unqueue`, `queueMove`, `queueClear`, `rescan`) calls
-    `_prefetch_next()`, which broadcasts a `preload`. In `player.js` that is
-    `case "preload": loadTrack(...)` — **fire and forget, not awaited, never
-    cancelled**. The `loading` set only dedupes the *same* track id, so
-    rebalancing the queue N times starts N concurrent 30 MB fetches and N
-    concurrent `decodeAudioData` calls, each yielding ~85 MB of PCM. On a tablet
-    that is the out-of-memory path: the decode rejects, `loadError` fires, and
-    the node is out of the song entirely.
-  - **Second bug, same area:** the cache evicts down to 2 buffers
-    (`cache.delete`) without telling the conductor, so `node.loaded` can claim a
-    node holds a track it has since dropped. The gate then counts it ready and
-    it joins late via `_catchup` instead of starting with everyone.
-  - Ladder, smallest first:
-    1. ~~`loadError` leaving `load_track`/`load_pct` set~~ — done 2026-08-02.
-       That was why the pill froze at `100%` instead of reading "not ready".
-    2. ~~**One prefetch at a time.**~~ — done 2026-08-02. `AbortController` per
-       in-flight guess; any newer preload supersedes it, a demand load included.
-       `preload` now carries `prefetch: true/false` so the player can tell a
-       guess from the file the room is waiting on and never aborts the latter.
-    3. ~~**Serialise decodes.**~~ — done 2026-08-02. A promise chain, and it
-       checks the abort signal before spending the memory. Measured: five queue
-       rebalances went from 5 concurrent decodes to 1.
-    4. **`unloaded` message** on eviction, so `node.loaded` stays truthful.
-    5. **One retry on failure**, with backoff. Today a failed decode gives up
-       permanently and the node is out until the next track.
-  - **Remaining: 4 and 5.** Both are `player.js`, so they need a fleet reload,
-    and the honest test is a party rather than a simulator.
-  - Verified sans party: a harness evaluates the shipped `onPreload`/`loadTrack`/
-    `decodeSerial` out of `player.js` against stubbed fetch and decode. Old code
-    vs new on the same checks — five rebalances, 5 concurrent decodes → 1; four
-    overlapping demand loads, 4 → 1. Real acoustics of this one is a party.
 
 - [ ] **Modular sync engine, switchable while stopped** (scoped 2026-08-02,
       nothing built)

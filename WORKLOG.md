@@ -924,3 +924,47 @@ simulator — the harness proves the concurrency arithmetic, not that a real
 tablet survives a real evening. Ladder steps 4 (an `unloaded` message, so
 `node.loaded` stops claiming buffers the player has evicted) and 5 (one retry
 with backoff) are still open.
+
+## 2026-08-02 (late) — loader ladder finished: retry, and telling the truth about evictions
+
+Steps 4 and 5, closing out the loader work started earlier this evening.
+
+**Shipped**
+- **`unloaded` on eviction.** The player keeps two decoded buffers and drops the
+  rest; it had been doing that silently. `node.loaded` is the conductor's *only*
+  view of what a node holds, and nothing else can contradict it — so a stale
+  entry made the load gate count a node ready, skip it, and let the play command
+  arrive at a node with no buffer, which then joined late through `_catchup`
+  instead of starting with everyone. An eviction is a fact only the node knows;
+  it now reports it. The playing track and the one just loaded are never
+  candidates, so this can only ever retire a buffer nobody is using.
+- **One retry, then give up and say so.** A decode can fail for reasons that
+  pass — a transient memory squeeze, a blip mid-transfer — and giving up
+  permanently on the first cost the node the whole song. Retrying forever would
+  be worse: it turns one struggling device into a machine for hammering the link
+  that is already the problem. So exactly one, after 1.5 s. An abort is never
+  retried, because an abort is a decision rather than a fault.
+- `loadTrack` split into a retry wrapper and `loadOnce`, so the policy lives in
+  one place and an abort stays distinguishable from a real failure all the way
+  up the stack.
+- **The conductor reads a retry correctly.** Download progress is monotone
+  *within* an attempt, so progress running backwards means exactly one thing: a
+  retry restarted the transfer. `decode_since` now clears on that, or the pill
+  would go on claiming a decode that had already failed and count the re-download
+  as part of it.
+
+**Verified** — 193 Python tests (up from 188) and 29 harness checks (up from 17):
+retry loads on the second attempt with no `loadError`; two failures give up
+exactly once and report exactly once; an aborted guess is never retried; an
+eviction is reported, never for the playing track, and leaves the cache at two.
+
+**One bug the harness caught on itself**, worth recording because it nearly
+passed silently: the sandbox had no `setTimeout` of its own. The stubs closed
+over Node's timers so every earlier check ran fine, but the retry backoff is the
+first code to call a timer from *inside* the evaluated `player.js`, and it threw
+`ReferenceError` the moment it was exercised. A harness that only tests the paths
+it already had stubs for will report health it hasn't measured.
+
+**Still true, and still the real test:** this is `player.js`, so every node needs
+a reload, and none of it has met a party. The harness proves the arithmetic of
+concurrency and failure handling; it does not prove a tablet survives an evening.

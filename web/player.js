@@ -307,35 +307,34 @@ function renderActivity() {
 }
 
 // --- track loading ------------------------------------------------------------
+// One second chance. A decode can fail for reasons that pass — a transient
+// memory squeeze, a Wi-Fi blip mid-transfer — and giving up permanently on the
+// first of those leaves the node silent for the whole song. Retrying forever
+// would be worse: it turns one struggling device into a machine for hammering
+// the very link that is already the problem.
+const LOAD_RETRIES = 1;
+const LOAD_RETRY_MS = 1500;  // long enough for a blip, or a GC, to pass
+
 async function loadTrack(trackId, url, signal) {
   if (cache.has(trackId) || loading.has(trackId)) return cache.get(trackId);
   loading.add(trackId);
-  dl.set(trackId, null);  // size unknown until the headers land
-  renderActivity();
   try {
-    const resp = await fetch(url || `/tracks/${trackId}`, signal ? { signal } : {});
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const bytes = await fetchWithProgress(resp, trackId);
-    dl.delete(trackId);
-    decoding.add(trackId);
-    renderActivity();
-    const buf = await decodeSerial(bytes, signal);
-    cache.set(trackId, buf);
-    // Decoded PCM is big (~85 MB per 4-min track): keep current + next only.
-    for (const key of cache.keys()) {
-      if (cache.size <= 2) break;
-      if (key !== trackId && key !== (current && current.trackId)) cache.delete(key);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await loadOnce(trackId, url, signal);
+      } catch (err) {
+        // An abort is a decision, not a fault: never retried, never reported.
+        // Reporting it would make the conductor toast a failure every time the
+        // queue is reordered, and mark a node bad for doing what it was told.
+        if (err && err.name === "AbortError") return null;
+        if (attempt >= LOAD_RETRIES) {
+          send({ type: "loadError", trackId, error: String(err).slice(0, 120) });
+          return null;
+        }
+        await new Promise((r) => setTimeout(r, LOAD_RETRY_MS));
+        if (signal && signal.aborted) return null;  // gave up on us while we waited
+      }
     }
-    send({ type: "loaded", trackId, durationMs: buf.duration * 1000 });
-    return buf;
-  } catch (err) {
-    // An abort is a decision, not a fault. Reporting it would make the
-    // conductor toast a failure every time the queue is reordered, and would
-    // mark a node bad for doing exactly what it was told.
-    if (!(err && err.name === "AbortError")) {
-      send({ type: "loadError", trackId, error: String(err).slice(0, 120) });
-    }
-    return null;
   } finally {
     loading.delete(trackId);
     dl.delete(trackId);        // an abandoned transfer must not leave the bar
@@ -343,6 +342,38 @@ async function loadTrack(trackId, url, signal) {
     if (prefetching && prefetching.trackId === trackId) prefetching = null;
     renderActivity();
   }
+}
+
+// One attempt. Throws on any failure so the caller owns the retry policy, and
+// so an abort stays distinguishable from a real fault all the way up.
+async function loadOnce(trackId, url, signal) {
+  dl.set(trackId, null);  // size unknown until the headers land
+  decoding.delete(trackId);  // a retry starts from the transfer again
+  renderActivity();
+  const resp = await fetch(url || `/tracks/${trackId}`, signal ? { signal } : {});
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const bytes = await fetchWithProgress(resp, trackId);
+  dl.delete(trackId);
+  decoding.add(trackId);
+  renderActivity();
+  const buf = await decodeSerial(bytes, signal);
+  cache.set(trackId, buf);
+  // Decoded PCM is big (~85 MB per 4-min track): keep current + next only.
+  for (const key of cache.keys()) {
+    if (cache.size <= 2) break;
+    if (key !== trackId && key !== (current && current.trackId)) {
+      cache.delete(key);
+      // The conductor's node.loaded is its only view of what we hold, and it
+      // has no other way to learn about this. Left unsaid, it counts us ready
+      // for a track we have dropped: the load gate skips us, the play command
+      // finds no buffer, and we join late through catch-up instead of starting
+      // with everyone. An eviction is a fact about us; we are the only ones who
+      // can report it.
+      send({ type: "unloaded", trackId: key });
+    }
+  }
+  send({ type: "loaded", trackId, durationMs: buf.duration * 1000 });
+  return buf;
 }
 
 // Stream the response body so we can report byte-download progress to the

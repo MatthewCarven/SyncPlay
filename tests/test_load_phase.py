@@ -138,6 +138,59 @@ def test_a_reconnect_starts_clean(c, node):
     assert node.stats(None)["decodingS"] is None
 
 
+# --- a retry walks the phase backwards -------------------------------------
+
+
+def test_progress_going_backwards_stops_the_decode_clock(c, node):
+    """The node retried a failed load, so it is downloading again, not decoding.
+
+    Progress only ever runs backwards on a retry — within one attempt the
+    percentage is monotone. A timer left running across that would quietly
+    count the retry as part of a decode that had already failed, and the pill
+    would claim a decode that is not happening.
+    """
+    progress(c, node, 100)
+    assert node.decode_since is not None
+    progress(c, node, 5)
+    assert node.decode_since is None
+    assert node.stats(None)["decodingS"] is None
+    assert node.stats(None)["loadPct"] == 5
+
+
+def test_the_clock_restarts_when_the_retry_finishes_downloading(c, node):
+    progress(c, node, 100)
+    progress(c, node, 5)
+    progress(c, node, 100)
+    assert node.decode_since is not None
+
+
+# --- eviction: the node is the only one who can tell us --------------------
+
+
+def test_unloaded_retires_a_track_the_node_dropped(c, node):
+    """`node.loaded` is the conductor's only view of what a node holds. A stale
+    entry makes the load gate count the node ready and skip it, so it joins
+    late through catch-up instead of starting with everyone."""
+    deliver(c, node, type="loaded", trackId=c.ids["a"], durationMs=100.0)
+    assert c.ids["a"] in node.loaded
+    deliver(c, node, type="unloaded", trackId=c.ids["a"])
+    assert c.ids["a"] not in node.loaded
+    assert node.stats(c.ids["a"])["loadedCurrent"] is False
+
+
+def test_unloaded_for_a_track_we_never_held_is_harmless(c, node):
+    deliver(c, node, type="unloaded", trackId="never-seen")
+    deliver(c, node, type="unloaded", trackId=c.ids["b"])
+    assert node.loaded == set()
+
+
+def test_unloaded_does_not_disturb_the_other_tracks(c, node):
+    for name in ("a", "b"):
+        deliver(c, node, type="loaded", trackId=c.ids[name], durationMs=100.0)
+    deliver(c, node, type="unloaded", trackId=c.ids["a"])
+    assert node.loaded == {c.ids["b"]}
+
+
 # --- what must stay invisible ----------------------------------------------
 
 

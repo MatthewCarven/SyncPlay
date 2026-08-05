@@ -139,7 +139,12 @@ flam — then play something.
   rather than left running. Decodes are serialised on top of that, so two
   ~85 MB buffers can never exist at once. Without both, reordering the queue a
   few times was enough to put a tablet into an out-of-memory decode failure and
-  drop it out of the song.
+  drop it out of the song. A failed load gets **one** retry before it is
+  reported, because a transient squeeze shouldn't cost a node the whole song
+  while an endless retry would just hammer the link that is already struggling.
+  And when a node evicts a buffer it says so (`unloaded`) — the conductor's idea
+  of what each node holds is otherwise unfalsifiable, and a stale entry makes
+  the load gate skip a node that is no longer ready.
 - Format support = whatever the node's browser decodes: MP3/AAC/WAV/FLAC work
   everywhere modern; OGG/Opus not on iOS Safari.
 - Nodes must (re)load the player page after a server upgrade to pick up new
