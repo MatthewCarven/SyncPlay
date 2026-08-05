@@ -561,7 +561,10 @@ class Conductor:
             return
         nxt = self._peek_next(p.track)
         if nxt and nxt.id != p.track.id:
-            await self._broadcast_players(self._preload_msg(nxt))
+            # Speculative, and re-sent on every queue edit — so it must be the
+            # cancellable kind, or reordering the queue piles concurrent
+            # downloads and decodes onto every node.
+            await self._broadcast_players(self._preload_msg(nxt, prefetch=True))
 
     # --- nudge persistence ----------------------------------------------------
 
@@ -1248,12 +1251,24 @@ class Conductor:
             self.mesh_pairs.pop(key, None)
             self.mesh_seen.pop(key, None)
 
-    def _preload_msg(self, track: Track) -> dict:
+    def _preload_msg(self, track: Track, prefetch: bool = False) -> dict:
+        """A preload, flagged with whether it is a guess or the real thing.
+
+        The player treats the two differently: a *prefetch* is speculation about
+        what plays next, it is re-guessed on every queue edit, and a superseded
+        guess is simply wrong — so only those are cancellable. The track we are
+        actually bringing up is never cancelled by a later guess. Without the
+        distinction the player cannot tell them apart at preload time, and
+        aborting the wrong one would cut the load the whole room is waiting on.
+
+        An older player page ignores the field and behaves exactly as before.
+        """
         return {
             "type": "preload",
             "trackId": track.id,
             "title": track.title,
             "url": f"/tracks/{track.id}",
+            "prefetch": prefetch,
         }
 
     async def _broadcast_players(self, payload: dict) -> None:

@@ -193,7 +193,7 @@ function handle(msg, c1) {
       onMeshSignal(msg.from, msg.payload || {});
       break;
     case "preload":
-      loadTrack(msg.trackId, msg.url);
+      onPreload(msg);
       break;
     case "arm":
       onArm(msg);
@@ -234,6 +234,49 @@ const dl = new Map();        // trackId -> percent, or null when size is unknown
 const decoding = new Set();  // trackId, while decodeAudioData is chewing
 let armed = false;           // countdown is up
 
+// The one speculative load allowed in flight: {trackId, ctl}. A prefetch is a
+// *guess* about what plays next, and the conductor re-guesses on every queue
+// edit — so without this, reordering the queue five times started five 30 MB
+// fetches and five ~85 MB decodes on top of each other. On a tablet that is an
+// out-of-memory decode rejection, and the node drops out of the song entirely.
+// A guess that has been superseded is simply wrong, so it gets aborted.
+let prefetching = null;
+
+// decodeAudioData is the memory-expensive half — one 4-minute track is ~85 MB
+// of PCM — and it gives no way to bound its own concurrency. So they queue.
+// One at a time is the actual OOM guard; cancelling superseded fetches above
+// only stops the pile-up forming in the first place.
+let decodeChain = Promise.resolve();
+
+function decodeSerial(bytes, signal) {
+  const run = decodeChain.then(() => {
+    // The wait may have outlived the reason for the load; don't spend the
+    // memory on a buffer nobody is going to ask for.
+    if (signal && signal.aborted) throw new DOMException("Aborted", "AbortError");
+    return ctx.decodeAudioData(bytes);
+  });
+  decodeChain = run.catch(() => {});  // one failure must not stall the chain
+  return run;
+}
+
+// A preload is either a guess (`prefetch`) or the file we are about to play.
+// Only guesses are cancellable, and *any* newer preload supersedes one — a
+// demand load included, which is the "rebalance the queue, then hit play" case
+// this exists for: the guess must never compete with the file actually needed.
+function onPreload(msg) {
+  const tid = msg.trackId;
+  if (prefetching && (prefetching.trackId !== tid || !msg.prefetch)) {
+    if (prefetching.trackId !== tid) prefetching.ctl.abort();
+    // Same track arriving as a demand load: promote it. It is no longer a
+    // guess, so nothing may cancel it from here on.
+    prefetching = null;
+  }
+  if (cache.has(tid) || loading.has(tid)) return;
+  const ctl = msg.prefetch && "AbortController" in window ? new AbortController() : null;
+  if (ctl) prefetching = { trackId: tid, ctl };
+  loadTrack(tid, msg.url, ctl && ctl.signal);
+}
+
 function renderActivity() {
   const curId = current && current.trackId;
   // A transfer for anything other than what's sounding is the prefetch of the
@@ -264,19 +307,19 @@ function renderActivity() {
 }
 
 // --- track loading ------------------------------------------------------------
-async function loadTrack(trackId, url) {
+async function loadTrack(trackId, url, signal) {
   if (cache.has(trackId) || loading.has(trackId)) return cache.get(trackId);
   loading.add(trackId);
   dl.set(trackId, null);  // size unknown until the headers land
   renderActivity();
   try {
-    const resp = await fetch(url || `/tracks/${trackId}`);
+    const resp = await fetch(url || `/tracks/${trackId}`, signal ? { signal } : {});
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const bytes = await fetchWithProgress(resp, trackId);
     dl.delete(trackId);
     decoding.add(trackId);
     renderActivity();
-    const buf = await ctx.decodeAudioData(bytes);
+    const buf = await decodeSerial(bytes, signal);
     cache.set(trackId, buf);
     // Decoded PCM is big (~85 MB per 4-min track): keep current + next only.
     for (const key of cache.keys()) {
@@ -286,12 +329,18 @@ async function loadTrack(trackId, url) {
     send({ type: "loaded", trackId, durationMs: buf.duration * 1000 });
     return buf;
   } catch (err) {
-    send({ type: "loadError", trackId, error: String(err).slice(0, 120) });
+    // An abort is a decision, not a fault. Reporting it would make the
+    // conductor toast a failure every time the queue is reordered, and would
+    // mark a node bad for doing exactly what it was told.
+    if (!(err && err.name === "AbortError")) {
+      send({ type: "loadError", trackId, error: String(err).slice(0, 120) });
+    }
     return null;
   } finally {
     loading.delete(trackId);
     dl.delete(trackId);        // an abandoned transfer must not leave the bar
     decoding.delete(trackId);  // stuck on "downloading" forever
+    if (prefetching && prefetching.trackId === trackId) prefetching = null;
     renderActivity();
   }
 }
@@ -331,6 +380,12 @@ async function fetchWithProgress(resp, trackId) {
 async function onPlay(msg) {
   clearArm();  // the real start supersedes whatever the countdown predicted
   if (ctx.state !== "running") await ctx.resume();
+  // Whatever we were guessing about next is now beside the point — this is the
+  // file the room is waiting on, and it must not queue behind a guess.
+  if (prefetching && prefetching.trackId !== msg.trackId) {
+    prefetching.ctl.abort();
+    prefetching = null;
+  }
   let buf = cache.get(msg.trackId);
   if (!buf) buf = await loadTrack(msg.trackId, null); // late: decode, then catch up
   if (!buf) return;

@@ -150,16 +150,22 @@ the player audio path only when unavoidable, one commit per feature so
   - Ladder, smallest first:
     1. ~~`loadError` leaving `load_track`/`load_pct` set~~ — done 2026-08-02.
        That was why the pill froze at `100%` instead of reading "not ready".
-    2. **One prefetch at a time.** An `AbortController` per in-flight prefetch;
-       a `preload` for a different track cancels the old one. The *current*
-       track's load is never cancelled.
-    3. **Serialise decodes.** Never two `decodeAudioData` at once — a promise
-       chain is enough. This is the actual OOM guard and the real fix.
+    2. ~~**One prefetch at a time.**~~ — done 2026-08-02. `AbortController` per
+       in-flight guess; any newer preload supersedes it, a demand load included.
+       `preload` now carries `prefetch: true/false` so the player can tell a
+       guess from the file the room is waiting on and never aborts the latter.
+    3. ~~**Serialise decodes.**~~ — done 2026-08-02. A promise chain, and it
+       checks the abort signal before spending the memory. Measured: five queue
+       rebalances went from 5 concurrent decodes to 1.
     4. **`unloaded` message** on eviction, so `node.loaded` stays truthful.
     5. **One retry on failure**, with backoff. Today a failed decode gives up
        permanently and the node is out until the next track.
-  - Steps 2–4 are `player.js`, so they need a fleet reload, and the honest test
-    is a party rather than a simulator. Worth its own session.
+  - **Remaining: 4 and 5.** Both are `player.js`, so they need a fleet reload,
+    and the honest test is a party rather than a simulator.
+  - Verified sans party: a harness evaluates the shipped `onPreload`/`loadTrack`/
+    `decodeSerial` out of `player.js` against stubbed fetch and decode. Old code
+    vs new on the same checks — five rebalances, 5 concurrent decodes → 1; four
+    overlapping demand loads, 4 → 1. Real acoustics of this one is a party.
 
 - [ ] **Modular sync engine, switchable while stopped** (scoped 2026-08-02,
       nothing built)

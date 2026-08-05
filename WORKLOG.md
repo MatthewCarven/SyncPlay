@@ -864,3 +864,63 @@ prefetch at a time via `AbortController`, serialised decodes as the real OOM
 guard, an `unloaded` message so `node.loaded` stops claiming buffers the player
 has evicted, and one retry on failure. Those are `player.js`, so they need a
 fleet reload and a party rather than a simulator to verify.
+
+## 2026-08-02 (evening) — loader hardening: one load, one decode
+
+**Prompt:** the screenshot from earlier today, and Matthew's own read of it —
+"I often rebalance the queue and the next file preload suffers because I do".
+He was right, and the code says so plainly.
+
+`_prefetch_next()` is called by every queue edit — `queue`, `unqueue`,
+`queueMove`, `queueClear`, `rescan` — and broadcasts a `preload`. The player
+handled that with `case "preload": loadTrack(msg.trackId, msg.url);`. Not
+awaited. Never cancelled. `loading` dedupes only the *same* track id, so N
+rebalances started N concurrent 30 MB fetches and N concurrent
+`decodeAudioData` calls, each yielding ~85 MB of PCM.
+
+**Shipped (steps 2 and 3 of the ladder)**
+- **A guess is cancellable; the real thing is not.** `preload` now carries
+  `prefetch: true/false`. Only `_prefetch_next` sets it — the preload
+  `_transport_play` sends, and the one a joining node gets for the active track,
+  are demand loads. The player keeps at most one speculative load in flight and
+  aborts it the moment a newer preload arrives, *including a demand one*, which
+  is exactly the "rebalance the queue then hit play" case: the guess must never
+  compete with the file the room is waiting on.
+- **Promotion.** A guess for track X followed by a demand load for the same X is
+  promoted rather than restarted — it stops being cancellable, so a later guess
+  can't kill the load that is now load-bearing. This is the case that made a
+  simple "newest wins" rule wrong, and it has its own check.
+- **Serialised decodes.** `decodeSerial` chains every `decodeAudioData` behind
+  the last, and re-checks the abort signal before spending the memory — a load
+  cancelled while queued must not decode anyway. This is the actual OOM guard;
+  cancelling fetches only stops the pile-up forming.
+- **An abort is not an error.** `AbortError` no longer sends `loadError`, or the
+  conductor would toast a failure every time the queue was reordered and mark a
+  node bad for doing what it was told.
+- An older player page ignores the new field and behaves exactly as before, so
+  the upgrade is safe to roll through the fleet one reload at a time.
+
+**Verified sans party.** A harness brace-matches the shipped `onPreload`,
+`loadTrack`, `decodeSerial` and `fetchWithProgress` straight out of `player.js`
+and runs them in a VM against a stubbed abortable fetch and an instrumented
+decode, so it exercises the real code rather than a paraphrase. Old vs new on
+identical checks:
+
+| scenario                          | old            | new            |
+|-----------------------------------|----------------|----------------|
+| 5 queue rebalances                 | 5 tracks loaded, **peak 5 concurrent decodes** | 1 loaded, 4 aborted, **peak 1** |
+| 4 overlapping demand loads         | peak 4 decodes | **peak 1**, all 4 still load |
+| guess superseded by another guess  | both loaded    | old aborted, no `loadError` |
+| guess superseded by a demand load  | not cancelled  | aborted |
+| guess promoted to demand           | (n/a)          | survives a later guess |
+
+Five concurrent decodes is ~425 MB of PCM on a device that has no business
+holding one. That is the tablet's out-of-memory failure, reproduced and then
+removed.
+
+**Caveat, stated plainly.** This is `player.js`, so every node needs a page
+reload before it takes effect, and the honest test is a party rather than a
+simulator — the harness proves the concurrency arithmetic, not that a real
+tablet survives a real evening. Ladder steps 4 (an `unloaded` message, so
+`node.loaded` stops claiming buffers the player has evicted) and 5 (one retry
+with backoff) are still open.

@@ -133,7 +133,13 @@ flam — then play something.
 
 - LAN only. No auth, no TLS — don't expose the port to the internet.
 - Nodes decode whole files in memory (~85 MB per 4-min track); the cache holds
-  the current + next track only. Phones are fine with this.
+  the current + next track only. Phones are fine with this — but only because
+  loads are **one at a time**: a prefetch is a guess about what plays next, the
+  conductor re-guesses on every queue edit, and a superseded guess is aborted
+  rather than left running. Decodes are serialised on top of that, so two
+  ~85 MB buffers can never exist at once. Without both, reordering the queue a
+  few times was enough to put a tablet into an out-of-memory decode failure and
+  drop it out of the song.
 - Format support = whatever the node's browser decodes: MP3/AAC/WAV/FLAC work
   everywhere modern; OGG/Opus not on iOS Safari.
 - Nodes must (re)load the player page after a server upgrade to pick up new
