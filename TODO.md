@@ -6,6 +6,19 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] Straggler load gate (2026-08-02) — one phone on a bad radio could hold the
+  whole room in silence for up to 20 s, and measurably bought nothing by it: the
+  old rule waited the full timeout and then started **without that node anyway**.
+  `hold_gate()` replaces "wait for everyone or time out" with a **quiet period** —
+  keep waiting while nodes are still arriving, stop once nobody new has for
+  `STRAGGLER_GRACE` (4 s). A uniformly slow fleet arrives in a drip that keeps
+  resetting it and is never cut; a single straggler stops the drip. Below half
+  ready it holds regardless, so a node with a cached copy can't strand the other
+  three (the failure a grace measured from the *first* ready node would have had).
+  The countdown remains a floor no gate may undercut. Measured against simulated
+  fleets: cold straggler 20.0 s → 6.0 s, warm skip 12.0 s → 4.7 s, uniformly slow
+  4.06 s → 4.06 s (identical, as intended). A cut node is deferred, not dropped —
+  `_catchup` already owns that — and control now names who and why.
 - [x] Real decode phase on the control page (2026-08-02) — the node pill froze
   on `⬇ 100%` for the whole decode, which is the longer half of a cold start on
   a tablet and the half the operator most wants to see moving. `decodeAudioData`
@@ -113,23 +126,6 @@ the player audio path only when unavoidable, one commit per feature so
     chirp has ever crossed actual air. First hardware run is the milestone.
   - No HTTPS needed for that: `localhost` is a secure context, so the conductor
     box can be the mic. HTTPS is only for putting the mic on a phone.
-
-- [ ] **A straggler must not hold up the fleet** (the actual party bug; fell out
-      of the static/dynamic discussion below and survives it)
-  - `_transport_play` waits for **every** connected node to decode, up to
-    `LOAD_GATE_TIMEOUT` (12 s) or `LOAD_GATE_COLD` (20 s). And `plan_start` says
-    `cold = not playing_now and not all(loaded)`, so **one** slow node also
-    forces a 6 s armed countdown on everyone else.
-  - So one phone on bad Wi-Fi, pulling 30 MB slowly, can delay the whole room's
-    song start by twenty seconds. Nothing to do with clocks — pure gate policy.
-  - Shape: start when a quorum is ready (all-but-N, or a short grace period past
-    the first-ready), and let the rest arrive via the existing `_catchup` path,
-    which is exactly what it is for. Needs no mobility concept, no new state, no
-    player change.
-  - Watch the interaction with the cold-start countdown: the armed window is
-    also the calibration window, so shortening it for a straggler trades a
-    little clock convergence for a lot less waiting. Probably worth it; measure
-    closure before and after rather than assuming.
 
 - [ ] **Modular sync engine, switchable while stopped** (scoped 2026-08-02,
       nothing built)

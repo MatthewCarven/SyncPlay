@@ -73,6 +73,16 @@ flam — then play something.
   land entirely inside a bad one. Resume, seek, ⏭ next and auto-advance are all
   *warm* (everyone already holds the buffer) and start immediately, because a
   countdown between songs in a playlist would be maddening.
+- **One straggler doesn't hold the room.** The load gate waits while nodes are
+  still *arriving* and stops once nobody new has turned up for
+  `STRAGGLER_GRACE` (4 s) — a quiet period, not a deadline. A fleet that is
+  merely slow arrives in a drip that keeps resetting it, so nobody gets cut; a
+  single phone on a bad radio stops the drip and the song starts a few seconds
+  later instead of at the 12/20 s timeout. Below half the fleet ready it waits
+  regardless, so a node holding a cached copy can't start the music for itself
+  and strand everyone else. A cut node isn't dropped — it reports `loaded` when
+  it decodes and the existing catch-up path drops it into the song in flight —
+  and the control page says who it was and why.
 - **Remembered skew.** A reconnecting node hands us a fresh clock epoch, so its
   offset must be re-learned from nothing. Its *crystal* is the same physical
   object it was last time, though, so the last **fitted** skew is persisted per

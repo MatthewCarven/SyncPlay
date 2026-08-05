@@ -741,3 +741,77 @@ readout on the player page. Display only — no gating, no policy, no colour tha
 means anything. It would simply make the one quantity that most determines a
 node's skew quality visible to the person deciding when to hit play, and later
 give something to compare a precision claim against. Not scheduled.
+
+## 2026-08-02 (later) — straggler load gate
+
+**Prompt:** this fell out of the static/dynamic discussion and outlived it. The
+feature that started that conversation was solving a problem the star topology
+had already solved; underneath it was a real one nobody had named. At a party,
+the wandering phone can't corrupt anyone's clock — but it can absolutely make
+everyone *wait*.
+
+`_transport_play` gated on **all** connected nodes having decoded, up to
+`LOAD_GATE_TIMEOUT` (12 s) or `LOAD_GATE_COLD` (20 s). And `plan_start` reads
+`cold = not playing_now and not all(loaded)`, so one straggler also forced a 6 s
+countdown on everybody else.
+
+**The measurement that settled the design.** Running the *old* rule against a
+simulated fleet with one node that never arrives: it waited the full 20 s and
+then started without that node **anyway**. The wait bought nothing. It wasn't a
+trade between "with" and "without" — it was twenty seconds of silence followed
+by the same outcome. That is what makes this cheap to fix rather than delicate:
+a node left behind is not left out, because it sends `loaded` on decode and
+`_catchup` drops it into the song from there, the same path a mid-song joiner
+already uses.
+
+**Shipped**
+- `hold_gate(n_ready, n_connected, quiet_for)` — pure, so the rule that decides
+  how long a room stands in silence can be pinned without a network or a party.
+  A **quiet period, not a deadline**: keep waiting while nodes are still
+  arriving, stop once nobody new has for `STRAGGLER_GRACE = 4.0`.
+- Why a quiet period and not a fixed grace. Two failure modes killed the simpler
+  rules. Measured from the *first* node ready, a laptop holding a cached copy
+  starts the clock at t=0 and strands the other three. Measured from the start
+  of the wait, a fleet that is merely uniformly slow gets cut for no reason.
+  Waiting on *progress* handles both, because it responds to what the fleet is
+  doing rather than to a clock.
+- The floor: below half the fleet ready we hold regardless of silence. That
+  isn't a straggler, it's the room — starting for a minority is playing to an
+  empty house. The hard timeout stays the outer bound in every branch.
+- The countdown is still a floor no gate may undercut. A timer that hits zero
+  early is a timer nobody trusts, which is the same rule the armed cold start
+  was built on.
+- `_transport_play` now tracks *arrivals* rather than the current ready count,
+  so a node dropping off can't read as somebody turning up.
+- Left-behind nodes are named in the log and in a control-page toast. A speaker
+  that starts three seconds after the others is a visible event and wants a
+  reason attached, or it looks like a fault.
+
+**Tests** — 187 passing, up from 118. `tests/test_load_gate.py` pins the floor,
+the grace boundary, both monotonicity properties (a node arriving may never
+*extend* the wait; more silence may never turn a release back into a hold), and
+one test per scenario the rule was designed against — the cached node, the
+uniformly slow fleet, the lone straggler, the two-node pair.
+
+**Smoke-tested** the real `_transport_play` against simulated fleets on scripted
+load timings, old rule vs new:
+
+| scenario                          | old     | new    |
+|-----------------------------------|---------|--------|
+| cold start, one straggler         | 20.03 s | 6.02 s |
+| warm skip to unprefetched, ditto  | 12.04 s | 4.66 s |
+| warm skip, uniformly slow fleet   | 4.06 s  | 4.06 s |
+| cold start, cached node + 3 slow  | —       | 6.02 s, all 4 in |
+
+The third row is the one worth staring at: identical to the character, which is
+the point. A slow fleet is not a straggler and must not be treated as one. The
+fourth confirms the floor does its job — the cached node cannot run off with the
+music. Both straggler rows start the same 3 of 4 nodes the old rule started
+after its full timeout.
+
+**Note.** Cold starts all land at ~6.0 s because `ARM_SECONDS` is the binding
+constraint once the gate stops being one — so the cold-start saving is capped at
+`LOAD_GATE_COLD − ARM_SECONDS` and any further gain there has to come from
+shortening the countdown, which is a different argument (that window is also the
+calibration burst). Warm starts — ⏭ to an unprefetched track, seek, resume — have
+no countdown, so they take the full benefit.

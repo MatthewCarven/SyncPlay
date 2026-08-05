@@ -41,6 +41,7 @@ PRE_END_BURST = 2.5       # heavy resync burst starts this long before track end
 GAP_AFTER_TRACK = 0.15    # silence after a track before the next is scheduled
 LOAD_GATE_TIMEOUT = 12.0  # warm start: fleet is going, buffer already decoded
 LOAD_GATE_COLD = 20.0     # cold start: a 70 MB decode from nothing needs room
+STRAGGLER_GRACE = 4.0     # quiet period: stop waiting once nobody new is arriving
 ARM_SECONDS = 6.0         # visible countdown floor before a cold start
 PENDING_PING_TTL = 5.0
 MAX_QUEUE = 200           # sanity cap on the explicit play queue
@@ -175,6 +176,45 @@ def plan_start(playing_now: bool, loaded: List[bool]) -> Tuple[bool, float]:
         return False, LOAD_GATE_TIMEOUT
     cold = not playing_now and not all(loaded)
     return cold, (LOAD_GATE_COLD if cold else LOAD_GATE_TIMEOUT)
+
+
+def hold_gate(n_ready: int, n_connected: int, quiet_for: float) -> bool:
+    """Whether the load gate should keep waiting for the rest of the fleet.
+
+    The old rule was "wait for everyone, up to the timeout", which meant one
+    phone on bad Wi-Fi could hold the whole room in silence for twenty seconds.
+    That is the wrong trade, because a node left behind is not left *out*: it
+    sends ``loaded`` the moment it decodes, and ``_catchup`` drops it into the
+    song a fraction of a second later through the same synced path a mid-song
+    joiner uses. The cost of starting without it is one node joining slightly
+    late. The cost of waiting is everybody standing in silence.
+
+    So the rule is a **quiet period**, not a deadline: keep waiting while nodes
+    are still arriving, and stop once nobody new has arrived for
+    ``STRAGGLER_GRACE``. That adapts to what is actually happening, where a
+    fixed grace cannot:
+
+    * A fleet that is uniformly slow arrives in dribs — someone new every second
+      or two — so the quiet period never elapses and everyone gets in.
+    * A single anomalous straggler stops the drip, and the wait ends a few
+      seconds later instead of at the hard timeout.
+    * A node that already holds the track (cached from a prefetch) can no longer
+      start the clock early and strand the other three, which is exactly what a
+      grace measured from the *first* node ready would have done.
+
+    The floor is the other half. Below half the fleet this isn't a straggler,
+    it's the fleet — starting for a minority would be playing to an empty room —
+    so we hold regardless of how quiet it has gone, and let the caller's hard
+    timeout be the only bound. With nobody connected there is nothing to wait
+    for; the caller's "no node managed to load this" path handles it.
+    """
+    if n_connected <= 0:
+        return False
+    if n_ready >= n_connected:
+        return False  # everyone is here; nothing left to wait for
+    if n_ready * 2 < n_connected:
+        return True  # not a straggler — most of the room is still loading
+    return quiet_for < STRAGGLER_GRACE
 
 
 def plan_nudges(rows: Dict[str, List[dict]]) -> List[dict]:
@@ -814,9 +854,20 @@ class Conductor:
         # armed, also hold until the countdown runs out, so the number on screen
         # is the truth even if the decode beat it.
         deadline = now() + gate
+        # `hold_gate` needs to know when the fleet last made progress, so track
+        # arrivals rather than just the current count — a node dropping off must
+        # not read as somebody arriving.
+        last_arrival = now()
+        seen_ready = sum(1 for n in connected if track.id in n.loaded)
         while now() < deadline:
             connected = [n for n in self.nodes.values() if n.connected]
-            if connected and all(track.id in n.loaded for n in connected):
+            n_ready = sum(1 for n in connected if track.id in n.loaded)
+            if n_ready > seen_ready:
+                seen_ready = n_ready
+                last_arrival = now()
+            if not hold_gate(n_ready, len(connected), now() - last_arrival):
+                # The countdown is a promise. However ready the room turns out
+                # to be, a timer that hits zero early is a timer nobody trusts.
                 if not arm or now() >= t_arm_end:
                     break
             await asyncio.sleep(0.15)
@@ -827,6 +878,19 @@ class Conductor:
             await self._disarm()
             await self.toast(f'No node managed to load "{track.title}" - not starting.')
             return
+        # Say who we left behind. They are deferred, not dropped — `_catchup`
+        # fires off their `loaded` message — but a speaker that starts a few
+        # seconds after the others is a visible event and should have a reason
+        # attached to it rather than looking like a fault.
+        late = [n for n in self.nodes.values()
+                if n.connected and track.id not in n.loaded]
+        if late:
+            names = ", ".join(n.name for n in late)
+            log.info('starting "%s" without %s - they catch up on decode',
+                     track.title, names)
+            await self.toast(
+                f"Starting without {names} - still loading, will join automatically."
+            )
 
         self.arming = None  # the play command below is what retires the countdown
         t_start = now() + PLAY_LEAD
