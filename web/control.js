@@ -128,6 +128,26 @@ function renderMesh() {
   $("meshEmpty").style.display = pairs.length ? "none" : "block";
 }
 
+// The offset's worst-case error, as a cell. Half the widest round trip admitted
+// to the fit — a certificate every sample carries (asymmetry <= rtt), not a
+// guess at the noise. The tooltip shows the floor (best_rtt/2) beside it: the
+// gap between the two is exactly what the RTT filter's tolerance costs this
+// node, which is the number the filter_best re-tune wants to be judged on.
+function trustCellFor(n) {
+  if (n.trustMs === null || n.trustMs === undefined) {
+    return `<td class="num" title="no surviving samples yet">—</td>`;
+  }
+  const cls = n.trustMs < 1 ? "trustGood" : (n.trustMs < 3 ? "trustFair" : "trustPoor");
+  const tip = `offset good to ±${n.trustMs.toFixed(2)} ms (worst case)
+`
+    + `bound by the widest round trip in the fit: ${fmt(n.worstRttMs, 1)} ms
+`
+    + `floor if only the best sample counted: ±${fmt(n.floorMs, 2)} ms
+`
+    + `${n.nUsed} of ${n.nSamples} samples survived the filter`;
+  return `<td class="num ${cls}" title="${esc(tip)}">±${n.trustMs.toFixed(2)}</td>`;
+}
+
 function renderNodeTable() {
   const rows = snap.nodes.map((n) => {
     // Decode outranks download: loadPct sits at 100 for the whole decode, so
@@ -146,6 +166,7 @@ function renderNodeTable() {
     return `<tr data-node="${esc(n.id)}">
       <td><span class="dot ${n.connected ? "ok" : ""}"></span>${esc(n.name)}</td>
       <td class="num">${fmt(n.offsetMs, 2)}</td>
+      ${trustCellFor(n)}
       <td class="num">${fmt(n.bestRttMs, 1)}</td>
       <td class="num">${fmt(n.skewPpm, 1)}</td>
       <td class="num"${ratePpm}>${err}</td>

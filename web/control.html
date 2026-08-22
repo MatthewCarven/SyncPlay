@@ -94,6 +94,10 @@
   .calDb { flex: none; width: 62px; text-align: right; color: var(--dim); font-size: .68rem; font-variant-numeric: tabular-nums; }
   .calTools { margin-top: 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .calOut { color: var(--dim); font-size: .72rem; font-variant-numeric: tabular-nums; }
+  /* trust: how tight the bound on this node's offset is, not how it feels */
+  td.trustGood { color: var(--accent); }
+  td.trustFair { color: var(--warn); }
+  td.trustPoor { color: var(--bad); }
   td.closureOk { color: var(--accent); }
   td.closureWarn { color: var(--warn); }
   td.closureBad { color: var(--bad); }
@@ -139,7 +143,9 @@
   <div class="card" style="overflow-x:auto">
     <table>
       <thead><tr>
-        <th>node</th><th class="num">offset ms</th><th class="num">best rtt</th>
+        <th>node</th><th class="num">offset ms</th>
+        <th class="num" title="worst-case error on the offset: half the widest round trip admitted to the fit. Path asymmetry cannot exceed the round trip, so this is a bound the samples certify - not an estimate of the noise.">&plusmn; ms</th>
+        <th class="num">best rtt</th>
         <th class="num">drift ppm</th><th class="num" title="live playback position error vs the conductor's ideal timeline">err ms</th>
         <th title="where this node actually is in the song (read-only)">position</th>
         <th class="num hideSm" title="usable / total in the window — the model runs on the usable ones">samples</th>

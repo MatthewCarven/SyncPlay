@@ -430,6 +430,14 @@ class Node:
             "offsetMs": None,
             "lastRttMs": None,
             "bestRttMs": None,
+            # Worst-case error on offsetMs, as a +/- — half the widest round trip
+            # admitted to the fit. Path asymmetry cannot exceed the round trip,
+            # so this is a bound the samples certify rather than a guess at the
+            # noise. floorMs is the same number for the *best* surviving sample:
+            # the gap between them is what the RTT filter's tolerance costs.
+            "trustMs": None,
+            "floorMs": None,
+            "worstRttMs": None,
             "skewPpm": None,
             "nUsed": 0,
             "nSamples": len(self.model),
@@ -441,6 +449,9 @@ class Node:
                 offsetMs=est.offset_at(now()) * 1000.0,
                 lastRttMs=est.last_rtt * 1000.0,
                 bestRttMs=est.best_rtt * 1000.0,
+                trustMs=est.trust_ms,
+                floorMs=est.floor_ms,
+                worstRttMs=est.worst_rtt * 1000.0,
                 skewPpm=est.skew_ppm,
                 nUsed=est.n_used,
                 spanS=est.span,

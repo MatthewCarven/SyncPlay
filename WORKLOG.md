@@ -968,3 +968,80 @@ it already had stubs for will report health it hasn't measured.
 **Still true, and still the real test:** this is `player.js`, so every node needs
 a reload, and none of it has met a party. The harness proves the arithmetic of
 concurrency and failure handling; it does not prove a tablet survives an evening.
+
+## 2026-08-22 — the ± column: every node's offset now carries its own certificate
+
+Three weeks of parked questions had the same shape — *how much should I trust
+this node's numbers?* — and the answer was already sitting in the data. A ping
+measures the offset with an error equal to half the path asymmetry, and
+asymmetry cannot exceed the round trip: `|d_out − d_ret| <= rtt`. So every
+sample arrives carrying a **certificate of its own worst-case error**,
+`|offset error| <= rtt/2`. No model, no assumption about the noise — a bound the
+measurement proves about itself. The node table now renders it as one cell:
+`± 0.76`, sitting immediately right of the offset it bounds.
+
+**The one real judgement call: `worst_rtt/2`, not `best_rtt/2`.** The TODO wrote
+this item as "±rtt/2" and min-RTT filtering makes `best` the tempting reading —
+but the estimate is a median (or a least-squares fit) over *every* sample that
+survived `filter_best`, not over the best one. It therefore lies among the
+survivors and inherits the bound of the **widest** one admitted. Quoting
+`best_rtt/2` would flatter exactly the node whose filter gate is widest open,
+which is the node the column exists to catch. Both numbers ship: the honest
+bound is the cell, the floor (`best_rtt/2`) is in the tooltip, and the gap
+between them is precisely what the filter's tolerance costs.
+
+That gap is not theoretical. A loopback node on the bench: `best rtt 0.54 ms`
+→ floor **±0.27**, but 56 of 56 samples admitted with a worst of `1.51 ms` →
+the true bound is **±0.76**, 2.8× the flattering number. The 2 ms absolute term
+in `cutoff = best + 0.002 + 0.25·best` admits everything when best is small,
+and now that shows up as a number instead of a hunch — which hands the parked
+`filter_best` re-tune the scoreboard it was missing. A test pins that too: same
+samples, two tolerances, and the loose one must report a wider bound while both
+quote the same floor.
+
+**How to read it, and what it settles.** Compare `err ms` against `±`:
+- `err` **inside** the bound → the servo is chasing measurement noise. A nudge
+  would be biasing against a number that averages to zero. Fix is more/better
+  samples (the adaptive cadence already does this).
+- `err` **outside** the bound → the offset is not the explanation; something
+  real is displacing this node, i.e. output latency the `getOutputTimestamp`
+  mapping isn't catching. Fix is a nudge.
+
+That is the tablet's `+6.5 ms` question from 2026-07-28, which has sat parked
+with two competing hypotheses and no way to separate them. One glance now
+separates them, because the tablet's `best rtt 3.8 ms` implies a bound around
+±2 ms — and 6.5 is well outside it. Re-measure before concluding: that reading
+predates the adaptive cadence.
+
+**Honest limits.** The bound is on the offset at its anchor `at`; projecting it
+forward by `skew` adds error this number does not model. And it bounds the
+*clock estimate*, not the whole chain — the ± is not a claim about speaker
+latency, buffer scheduling, or air.
+
+**Shipped:** `ClockEstimate` gains `worst_rtt` (one `max()` next to the existing
+`min()`) plus three read-only properties — `trust_s`/`trust_ms`/`floor_ms` —
+alongside `skew_ppm`. No call site changed, no code path branches on any of
+them: this is arithmetic *about* the estimate, and the timing core computes
+exactly what it computed yesterday. `stats()` exposes `trustMs`/`floorMs`/
+`worstRttMs`; the control page adds a column and three CSS colours (good < 1 ms,
+fair < 3 ms, poor beyond). `best rtt` stays where it was — nothing was removed.
+
+**Conductor + control only. `player.js` is untouched, so no fleet reload** —
+which was the point of picking this one: the fleet already owes a reload for
+the loader work, and this shouldn't add a second reason.
+
+**Verified:** 201 tests (up from 193). Seven new in `tests/test_trust.py`, and
+the one that matters is a randomized adversarial search — 1000 windows, random
+round trips, and each leg split anywhere from symmetric to entirely one-sided —
+asserting the estimate's *actual* error never exceeds the bound. A worst-case
+window (every sample all-outbound) proves it's reachable and not merely safe: a
+bound nothing can approach would be useless. Plus: a spike rejected by the
+filter cannot widen the bound; a node with no surviving samples reports `None`,
+never `±0.00` (a node nobody has timed must not own the most confident cell on
+the page). Live over `:8931` with a real joined node: the numbers above, all
+four cell states rendered from an injected snapshot (—/good/fair/poor), tooltip
+correct, no console errors.
+
+**For meatthread0:** control page reload only, nodes can stay as they are. Worth
+one minute at the next play: read the tablet's `±` against its `err`.
+

@@ -6,6 +6,19 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] The **± trust column** (2026-08-22) — every node's offset now shows the
+  worst-case error the samples themselves certify. Asymmetry is bounded by the
+  round trip, so a sample of round trip `rtt` proves `|offset error| <= rtt/2`;
+  no noise model, no assumption. The judgement call was **`worst_rtt/2`, not
+  `best_rtt/2`**: the estimate is a median/fit over everything `filter_best`
+  admitted, so it inherits the *widest* survivor's bound, and quoting the best
+  would flatter precisely the node whose gate is widest open. Floor
+  (`best_rtt/2`) lives in the tooltip; the gap between them is what the filter's
+  tolerance costs. Bench loopback: floor ±0.27 but true bound ±0.76, 2.8×.
+  `ClockEstimate` gains `worst_rtt` + three read-only properties; **nothing
+  branches on them**, so the timing core computes what it always did. Conductor
+  + control only — **no fleet reload**. 201 tests (7 new), including a 1000-trial
+  randomized adversarial search over every possible leg split.
 - [x] Battle-hardened the loader (2026-08-02) — all five rungs. **Symptom:** a
   tablet frozen on `100%` while the other three played, `err` and `position`
   both `—`; it had downloaded the file and then silently sat the song out.
@@ -196,7 +209,15 @@ the player audio path only when unavoidable, one commit per feature so
   - The adaptive cadence (shipped same day) may well have already fixed the
     second case, so **re-measure before concluding anything** — the +6.5 was
     recorded at 1.00× cadence, which no longer exists for that node.
-  - Cheapest possible test: watch that one cell for a minute.
+  - **The ± column (shipped 2026-08-22) now separates them in one glance**, which
+    is what the two hypotheses were waiting for. Read `err ms` against `±`:
+    *inside* the bound → the servo is chasing measurement noise and a nudge
+    would bias against a number that averages to zero; *outside* it → the offset
+    estimate cannot explain the displacement, so it is real output latency and
+    a nudge is right. Tablet `best rtt` ~3.8 ms implies a bound near ±2 ms, and
+    +6.5 sits well outside — but that reading predates the adaptive cadence, so
+    re-measure before acting.
+  - Cheapest possible test: watch those two cells for a minute.
 
 - [ ] **Spread the join burst across more than one radio window** (partly
       mitigated by the armed cold start; still open for mid-song joins)
@@ -225,6 +246,12 @@ the player audio path only when unavoidable, one commit per feature so
     changes behaviour for *every* node, not just returning ones. Sim coverage
     in `test_timesync.py` should show it helps a jittery node without
     starving a quiet one of samples.
+  - **It now has a scoreboard.** The ± column is a direct readout of what this
+    tolerance costs: a wider gate admits a wider worst survivor and the bound
+    grows, while the floor (`best_rtt/2`) holds still. Bench measurement of the
+    status quo: loopback best 0.54 ms, all 56 samples admitted, worst 1.51 ms —
+    the 2 ms absolute term admits *everything* when best is small. Any re-tune
+    should be argued in ± ms, and `test_trust.py` already pins the relationship.
 
 - [ ] **More timing info on the dashboard** (cheap → fancy)
   - per-node `outputLatency`/`baseLatency` + sample rate (explains *why* a
@@ -234,13 +261,7 @@ the player audio path only when unavoidable, one commit per feature so
     ClockModel window)
   - offset-residual RMS vs the regression line = live measurement-noise
     estimate ("how much should I trust this node's numbers")
-  - **±rtt/2 as a single trust column.** Path asymmetry is bounded by the round
-    trip (`|d_out - d_ret| <= rtt`), so every sample carries a certificate of its
-    own worst-case error: `|offset error| <= rtt/2`. That collapses the whole
-    row into one honest number per node — "good to ±0.4 ms" — and it is the
-    number that would have settled the tablet's +6.5 ms at a glance instead of
-    leaving two competing hypotheses. It is also *why* min-RTT filtering is
-    principled rather than a heuristic: it selects for the tightest bound.
+  - ~~±rtt/2 as a single trust column~~ — **done 2026-08-22**, see Done below.
 
 - [ ] **Three small fixes surfaced while scoping the sync engine** (2026-08-02,
       independent of it and of each other)
@@ -260,10 +281,8 @@ the player audio path only when unavoidable, one commit per feature so
     that node's next session. Wants a minimum fit quality (residual RMS, or R²)
     before banking, which is strictly better than a movement flag would have
     been because it catches *every* bad fit, not just the moving kind.
-  - `loadError` leaves `load_track`/`load_pct` set, so a node that failed to
-    decode shows a stuck `⬇ 87%` until its next transfer. (The decode timer is
-    already cleared on this path as of 2026-08-02; these two were left alone
-    deliberately so the fix is its own commit.)
+  - ~~`loadError` leaves `load_track`/`load_pct` set~~ — **fixed** in `e27f5a1`
+    (2026-08-05); a failed load now retires the whole pill, not just its timer.
 
 ## Considered and dropped
 

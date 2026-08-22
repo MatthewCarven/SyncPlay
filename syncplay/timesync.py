@@ -99,10 +99,41 @@ class ClockEstimate:
     n_used: int  # samples that survived the RTT filter
     span: float  # conductor-time span covered by the used samples
     skew_fitted: bool = False  # True only if `skew` came from this window's fit
+    # Widest round trip that survived the RTT filter, i.e. the worst sample the
+    # offset was actually computed from. Read-only bookkeeping for `trust`.
+    worst_rtt: float = 0.0
 
     @property
     def skew_ppm(self) -> float:
         return self.skew * 1e6
+
+    @property
+    def trust_s(self) -> float:
+        """Worst-case error on this offset, in seconds — a certificate, not a guess.
+
+        A ping measures the offset with an error equal to the *asymmetry* of the
+        path, and asymmetry is bounded by the round trip: |d_out − d_ret| <= rtt,
+        so any single sample carries |offset error| <= rtt/2. The estimate is a
+        median (or a fit) over every sample that survived the filter, so it lies
+        between them and inherits the bound of the *widest* one admitted — not
+        the tightest. Hence worst_rtt, not best_rtt: `best_rtt/2` is the floor
+        this node could reach if the filter admitted nothing else, and quoting it
+        as the answer would flatter a node whose filter gate is wide open.
+
+        Bounds the offset at `at`. Projecting it forward by `skew` adds error
+        this number does not attempt to model.
+        """
+        return self.worst_rtt / 2.0
+
+    @property
+    def trust_ms(self) -> float:
+        return self.trust_s * 1000.0
+
+    @property
+    def floor_ms(self) -> float:
+        """The tightest certificate any surviving sample carries, in ms. The gap
+        between this and `trust_ms` is the price of the filter's tolerance."""
+        return self.best_rtt * 1000.0 / 2.0
 
     def offset_at(self, t: float) -> float:
         """Projected offset at conductor time ``t`` (drift-compensated)."""
@@ -218,6 +249,7 @@ class ClockModel:
             skew=slope,
             at=anchor_t,
             best_rtt=min(s.rtt for s in used),
+            worst_rtt=max(s.rtt for s in used),
             last_rtt=self._samples[-1].rtt,
             n_samples=len(self._samples),
             n_used=n,
