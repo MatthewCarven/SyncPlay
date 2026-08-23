@@ -979,10 +979,23 @@ class Conductor:
         for node in ready:
             if await self._send_play(node, self.playing):
                 started.append(node.name)
-        log.info(
-            'play "%s" at T+%.1fs seek=%.0fms -> %s',
-            track.title, PLAY_LEAD, seek_ms, ", ".join(started) or "nobody",
-        )
+        if started:
+            log.info(
+                'play "%s" at T+%.1fs seek=%.0fms -> %s',
+                track.title, PLAY_LEAD, seek_ms, ", ".join(started),
+            )
+        else:
+            # Every ready node failed `_send_play`, i.e. not one of them has a
+            # clock estimate yet. The no-load path above toasts; this one only
+            # logged, so the single outcome that leaves `self.playing` set with
+            # nothing sounding was also the one with no signal on the page.
+            log.warning(
+                'play "%s": no node could be timed - nothing started', track.title
+            )
+            await self.toast(
+                f'Could not start "{track.title}" - no node has a clock estimate '
+                "yet. Give it a few seconds and press play again."
+            )
         self._advance_task = asyncio.create_task(self._auto_advance(self.playing))
         # Get the *next* track decoding everywhere while this one plays.
         await self._prefetch_next()
@@ -1167,6 +1180,17 @@ class Conductor:
 
     async def _measure_one(self, speaker_id: str) -> None:
         """The single 📏 probe: one speaker, one chirp, ToF straight to control."""
+        # `_measure_pending` holds exactly one probe, so a second one overwrites
+        # the first — and the first then waits out MEASURE_TIMEOUT and is dropped.
+        # During a sweep that silently costs a rep, which is precisely what
+        # `_calibrating` exists to prevent; `_measure_all` guarded itself and
+        # this didn't. Two rapid 📏 clicks collide the same way.
+        if self._calibrating:
+            await self.toast("A calibration sweep is running - wait for it to finish.")
+            return
+        if self._measure_pending is not None:
+            await self.toast("A measurement is already in flight.")
+            return
         if self.playing is not None:
             await self.toast("Stop playback before calibrating.")
             return
@@ -1206,6 +1230,11 @@ class Conductor:
         """
         if self._calibrating:
             await self.toast("A calibration sweep is already running.")
+            return
+        if self._measure_pending is not None:
+            # The reverse of the guard in `_measure_one`: a sweep starting on top
+            # of a manual probe would overwrite it and lose its own first rep.
+            await self.toast("A single measurement is in flight - wait for it.")
             return
         if self.playing is not None:
             await self.toast("Stop playback before calibrating.")

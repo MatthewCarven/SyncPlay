@@ -1188,3 +1188,56 @@ check caught it before the browser did.
 
 **Conductor + control only. `player.js` untouched, so no fleet reload.**
 
+## 2026-08-23 (evening) — two silences given a voice
+
+Both of these were on the small-fixes list, both are the same bug in different
+clothes: the system knew something had gone wrong and didn't say so.
+
+**A start that reached nobody.** `_transport_play` ends by sending play to every
+ready node and logging who got it — `", ".join(started) or "nobody"`. That
+`"nobody"` is a real outcome: `_send_play` refuses a node with no clock estimate,
+so if *every* ready node is untimed, nothing starts. `self.playing` is set, the
+countdown is retired, the page says a track is playing, and the room is silent.
+The no-load path immediately above it toasts; this one only logged, so the single
+failure that leaves state lying was the one with no signal on the page. It now
+toasts and logs at warning, and the message says what to do — the condition is
+transient, so "give it a few seconds and press play again" is genuinely the fix.
+
+**What I deliberately did not do:** tear the playback state back down. It is
+tempting, since the conductor is claiming something untrue — but a node that
+later reports `loaded` gets pulled in by `_catchup`, which waits up to 5 s for its
+own estimate to converge. Keeping `self.playing` is what leaves that door open;
+clearing it would close the recovery path to fix the cosmetics. So: say it out
+loud, leave the machinery alone.
+
+**A probe that could eat a rep.** `_measure_pending` holds exactly one probe, and
+whoever writes it last wins — the loser waits out `MEASURE_TIMEOUT` and is
+dropped. `_measure_all` guarded itself against a second sweep; `_measure_one`
+guarded nothing. So a 📏 pressed during a sweep silently cost that sweep a rep,
+which is precisely what `_calibrating` exists to prevent, and the sweep would go
+on to report a median over fewer readings than it claimed. Two rapid 📏 clicks
+collided the same way, with no flag involved at all.
+
+Three guards, because the hole is symmetric: `_measure_one` refuses during a
+sweep, `_measure_one` refuses while another probe is in flight, and `_measure_all`
+refuses while a manual probe is in flight. That last one is slightly past the
+literal TODO item and is included on purpose — a sweep starting on top of a
+manual probe loses its own *first* rep, which is the same fault read backwards.
+
+**Verified:** 224 tests, up from 217. Seven new in `tests/test_guards.py`, driven
+through the real `_transport_play` and `_measure_*` with the load gate shrunk to
+a blink: a play that times nobody toasts and names the track; a normal start says
+nothing extra (the guard must not fire on the happy path); the no-load failure
+keeps its own distinct message rather than being absorbed into the new one; each
+of the three measurement collisions is refused with the in-flight probe intact;
+and an ordinary probe with nothing in flight still arms, so the guards don't lock
+out the case they exist to protect.
+
+Live on `:8931`, playing a real track on a joined node: `play "02 - Out Of Time"
+at T+1.8s seek=0ms -> bench-d`, no spurious toast, node state `♪ playing`. Its
+`err ms` came in at 41 and the servo hauled it to 28 then 18.5 while sitting on
+its -800 ppm rail — that opening offset is a sandbox-browser artefact (this tab's
+audio clock is not a real output device) and the convergence is the servo doing
+exactly its job. Nothing here touches that path: the only change inside
+`_transport_play` is which branch runs *after* the play commands have gone out.
+

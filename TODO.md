@@ -6,6 +6,12 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] **Two silences given a voice** (2026-08-23) — a start that could time no
+  node at all only ever logged `"nobody"` while `self.playing` said otherwise;
+  it now toasts and logs at warning (state deliberately left standing, so
+  `_catchup` can still recover it). And `_measure_pending` holds one probe, so a
+  📏 during a sweep silently cost the sweep a rep — now guarded in all three
+  directions. 224 tests (7 new in `test_guards.py`).
 - [x] **Forgetting a remembered drift** (2026-08-23) — `_state["skews"]` had no
   exit: `nudges`/`eqs` pop their entry when cleared, skews only ever grew, so a
   value banked before the gate existed seeded that node forever. Now `_save_state`
@@ -290,13 +296,14 @@ the player audio path only when unavoidable, one commit per feature so
 
 - [ ] **Three small fixes surfaced while scoping the sync engine** (2026-08-02,
       independent of it and of each other)
-  - `_transport_play` logs `"nobody"` when no node could be timed, but doesn't
-    toast — unlike the no-load path directly above it, which does. The one
-    failure mode that leaves state lying is the one with no visible signal.
-  - `_measure_one` isn't gated by `_calibrating`. A manual 📏 during a sweep
-    overwrites `_measure_pending` with no in-flight check, so the sweep's rep
-    waits out `MEASURE_TIMEOUT` and is dropped — which is exactly what the flag
-    exists to prevent. `_measure_all` guards itself; `_measure_one` doesn't.
+  - ~~`_transport_play` logs `"nobody"` without toasting~~ — **done 2026-08-23**.
+    Toast + warning log. The playback state is deliberately *not* torn down: a
+    node reporting `loaded` later is still pulled in by `_catchup`, and clearing
+    `self.playing` would close that recovery path to fix the cosmetics.
+  - ~~`_measure_one` isn't gated by `_calibrating`~~ — **done 2026-08-23**. Three
+    guards, since the hole is symmetric: a manual probe refuses during a sweep
+    and while another probe is in flight, and a sweep refuses while a manual
+    probe is in flight (that one loses the sweep's *first* rep).
   - ~~`_state["skews"]` is write-only~~ — **done 2026-08-23**, see Done below.
   - ~~`remember_skew` will bank a slope fitted from a node *moving*~~ — **done
     2026-08-23**, see Done below. Not the residual/R² check this item asked for:
