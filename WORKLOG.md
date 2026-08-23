@@ -1241,3 +1241,81 @@ audio clock is not a real output device) and the convergence is the servo doing
 exactly its job. Nothing here touches that path: the only change inside
 `_transport_play` is which branch runs *after* the play commands have gone out.
 
+## 2026-08-23 (late) — auto-nudge: making a failed measurement diagnosable
+
+Starting on auto-nudge again, and the first slice is not step 4. Step 4 is
+*apply*, and applying proposals that have never met air is building on a floor
+nobody has stood on. The thing actually blocking this ladder is one hardware run
+— and the last attempt at one, back in July, produced a month of ambiguity
+instead of an answer. That is the fixable part, so that is what got fixed.
+
+**The flaw, and it is a real one.** `crossCorrelate` returns a *normalized*
+correlation: `dot / sqrt(sigE * refE)`. Normalizing by the signal's own energy is
+right for finding a shape regardless of level — and it means the peak carries
+**no information about whether the microphone heard anything at all**. Silence
+correlates against the chirp just as willingly as a chirp does; it simply
+correlates badly. So `peak 0.02` was reported for a dead input, and `peak 0.02`
+would be reported for a live mic in a room where the chirp never arrived. Two
+faults, opposite fixes — one is Windows, one is the room — and one number that
+cannot tell them apart. In July we spent the difference.
+
+**The fix is to report the level, because nothing else can.** `finishCapture()`
+now also computes the capture's RMS and peak in dBFS plus the fraction of samples
+at full scale, and sends them with the result. A failed probe is then named by
+its cause:
+
+- `mic heard nothing (-74 dBFS) - check the input, not the room`
+- `input clipping (14% of the window) - turn the mic gain down`
+- `no usable capture` — kept, and now it *means* something: the level was
+  healthy and the correlator genuinely missed. That one is a room problem.
+
+The threshold is -60 dBFS. A working mic in a quiet room still picks up its own
+noise floor and the building; July's dead reading was -74, and the same laptop
+had read -43 when it was alive. -60 sits in the gap with room on both sides.
+
+**Level never decides whether a reading is believed.** `CAL_MIN_PEAK` remains the
+only gate, and there is a test asserting that a quiet-but-clean capture still
+proposes exactly what it proposed before. This slice adds a diagnosis, not a
+policy — a quiet capture that correlates at 0.9 is a measurement, and treating it
+as suspect would be inventing a rule to solve a problem we do not have.
+
+The level shows on every row, not just failures, because a sweep working at
+-55 dBFS is one bad evening from not working, and the `in level` column is where
+you would see that coming.
+
+**Verified:** 248 Python tests, up from 224 (18 new), plus a 13-check JS harness
+now kept at `tools/level_harness.js` rather than in a scratch directory — the
+loader harness taught that lesson. It runs the **shipped** `captureLevel` pulled
+straight out of `player.js` and holds it to levels known by hand: digital silence
+reads the -120 floor; a full-scale square reads 0 dBFS RMS, 0 dBFS peak, 100%
+clipped; a 0.1-amplitude sine reads -23.0 RMS against -20.0 peak (that 3 dB gap
+is the proof the two are genuinely computed separately, not one copied into the
+other); an empty capture stays finite instead of going NaN. Then the two numbers
+that matter: a synthesized -43 dBFS room clears the silence gate, and a -74 dBFS
+one is caught by it. Those are July's actual readings, alive and dead.
+
+On the Python side: each of the three failures gets its own name, a successful
+sweep is unchanged, level never moves a proposal, and a player page too old to
+report a level degrades to the old wording rather than erroring. The dBFS and
+percentage both arrive over a socket, so both get clamping validators with their
+own parametrized tests — 12 dBFS is impossible and is clamped rather than
+rejected, NaN and rubbish become None.
+
+Live on `:8931`: all four row states rendered (healthy / silent / clipping / no
+data), the right colours, and the single-shot 📏 readout carries the level too.
+No mic in the sandbox, so what was checked is the plumbing and the arithmetic —
+the acoustic loop remains untested, which is the entire point of this slice.
+
+**This one touches `player.js`, so the fleet does need a reload** — the first of
+these slices that does. It rides along with the reload already owed for the
+loader work.
+
+**For meatthread0 — this changes what the first hardware run tells you.** Run it
+exactly as before (conductor's own browser at `localhost`, JOIN, "use as
+calibration mic", two devices as speakers, stop playback, 📐 calibrate all). The
+new column is `in level`. If it reads red and says *silent*, stop: it is the
+Windows input, not SyncPlay, and no amount of re-running will help. If it reads
+green and the peaks are still low, that is a genuine acoustic miss and worth
+chasing — placement, speaker volume, a door. Either way you now get an answer
+rather than a mystery.
+

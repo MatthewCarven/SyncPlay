@@ -68,6 +68,12 @@ MEASURE_TIMEOUT = 3.0     # give up on a probe that never reports back
 CAL_REPS = 3              # chirps per speaker; medianed to survive one bad peak
 CAL_GAP = 0.35            # silence between probes, so reflections die down
 CAL_MIN_PEAK = 0.15       # correlation peak below this = didn't really hear it
+# Capture RMS below this is not a quiet room, it's a dead input. A working mic in
+# a silent room still picks up its own noise floor and the building around it,
+# somewhere north of -60 dBFS; the July failure sat at -74 with the level meter
+# flat. The threshold only ever changes what a *failed* probe is called.
+CAL_SILENT_DB = -60.0
+CAL_CLIP_PCT = 1.0        # this much of the window at full scale = gain too high
 CAL_MIN_GOOD = 2          # reps that must clear the gate before we'll propose
 MAX_NUDGE_MS = 500.0      # matches the clamp on the manual nudge input
 
@@ -100,6 +106,23 @@ def _clean_eq(vals) -> List[float]:
             except (ValueError, TypeError):
                 pass
     return out
+
+
+def _clean_db(v) -> Optional[float]:
+    """A dBFS reading off the wire. Client data, so bound it to the real range."""
+    try:
+        d = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if not math.isfinite(d) else max(-120.0, min(0.0, d))
+
+
+def _clean_pct(v) -> Optional[float]:
+    try:
+        p = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if not math.isfinite(p) else max(0.0, min(100.0, p))
 
 
 def _clean_skew(v) -> Optional[float]:
@@ -239,6 +262,26 @@ def hold_gate(
     return quiet_for < grace
 
 
+def _capture_failure_note(
+    n_good: int, rms_db: Optional[float], clip_pct: Optional[float]
+) -> str:
+    """Name a failed measurement by its cause, not just its effect.
+
+    "no usable capture" is true of a muted microphone, a clipping one, and a
+    correlator that simply missed — three faults with three different fixes, and
+    only one of them is in the room. The level tells them apart, and `peak`
+    cannot: a normalized correlation measures shape, so it reports a number for
+    silence just as readily as for a chirp.
+    """
+    if n_good:
+        return f"only {n_good} clean rep(s)"
+    if rms_db is not None and rms_db < CAL_SILENT_DB:
+        return f"mic heard nothing ({rms_db:.0f} dBFS) - check the input, not the room"
+    if clip_pct is not None and clip_pct >= CAL_CLIP_PCT:
+        return f"input clipping ({clip_pct:.0f}% of the window) - turn the mic gain down"
+    return "no usable capture"
+
+
 def plan_nudges(rows: Dict[str, List[dict]]) -> List[dict]:
     """Turn repeated ToF probes into a proposed nudge per speaker.
 
@@ -263,6 +306,11 @@ def plan_nudges(rows: Dict[str, List[dict]]) -> List[dict]:
     for spk_id, probes in rows.items():
         good = [p for p in probes if (p.get("peak") or 0.0) >= CAL_MIN_PEAK]
         tofs = sorted(p["tofMs"] for p in good)
+        # Loudest capture across the reps, and the worst clipping. Diagnostics
+        # only — nothing is accepted or rejected on level. They exist to answer
+        # the question `peak` cannot: did the microphone hear *anything*.
+        levels = [p["rmsDb"] for p in probes if p.get("rmsDb") is not None]
+        clips = [p["clipPct"] for p in probes if p.get("clipPct") is not None]
         row = {
             "id": spk_id,
             "nGood": len(good),
@@ -273,12 +321,13 @@ def plan_nudges(rows: Dict[str, List[dict]]) -> List[dict]:
             "spreadMs": (tofs[-1] - tofs[0]) if len(tofs) > 1 else 0.0,
             "peak": max((p.get("peak") or 0.0) for p in good) if good else None,
             "snr": max((p.get("snr") or 0.0) for p in good) if good else None,
+            "rmsDb": max(levels) if levels else None,
+            "clipPct": max(clips) if clips else None,
             "proposedMs": None,
             "note": "",
         }
         if len(good) < CAL_MIN_GOOD:
-            row["note"] = ("no usable capture" if not good
-                           else f"only {len(good)} clean rep(s)")
+            row["note"] = _capture_failure_note(len(good), row["rmsDb"], row["clipPct"])
         summary.append(row)
 
     usable = [r for r in summary if r["tofMs"] is not None and not r["note"]]
@@ -1216,6 +1265,8 @@ class Conductor:
                 "tofMs": res["tofMs"],
                 "peak": res.get("peak"),
                 "snr": res.get("snr"),
+                "rmsDb": res.get("rmsDb"),
+                "clipPct": res.get("clipPct"),
             }
         )
 
@@ -1643,6 +1694,9 @@ class Conductor:
                         "tofMs": (arrival - pend["t_emit"]) * 1000.0,
                         "peak": data.get("peak"),
                         "snr": data.get("snr"),
+                        "rmsDb": _clean_db(data.get("rmsDb")),
+                        "peakDb": _clean_db(data.get("peakDb")),
+                        "clipPct": _clean_pct(data.get("clipPct")),
                     }
             if waiter is not None and not waiter.done():
                 waiter.set_result(result)

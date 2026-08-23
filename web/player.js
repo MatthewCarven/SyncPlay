@@ -747,7 +747,33 @@ function finishCapture() {
   const ref = makeChirpArray(ctx.sampleRate);
   const { lag, peak, snr } = crossCorrelate(sig, ref);
   const arrivalCtx = (cap.startFrame + lag) / ctx.sampleRate;
-  send({ type: "measureResult", seq: cap.seq, arrivalPerfMs: ctxToPerfMs(arrivalCtx), peak, snr });
+  send({
+    type: "measureResult", seq: cap.seq,
+    arrivalPerfMs: ctxToPerfMs(arrivalCtx), peak, snr,
+    ...captureLevel(sig),
+  });
+}
+
+// How loud the capture actually was. This is NOT derivable from `peak`: the
+// correlation is normalized by signal energy, so it measures shape, not level —
+// a mic recording pure silence still yields some number, and a dead input and a
+// missed chirp look identical from the peak alone. That ambiguity is what cost
+// us July: peak 0.02 with a laptop mic reading -74 dBFS, and no way to tell
+// "your input is muted" from "the correlator failed". So report the level.
+function captureLevel(sig) {
+  let sum = 0, peakAbs = 0, clipped = 0;
+  for (let i = 0; i < sig.length; i++) {
+    const a = Math.abs(sig[i]);
+    sum += sig[i] * sig[i];
+    if (a > peakAbs) peakAbs = a;
+    if (a >= 0.99) clipped++;
+  }
+  const db = (v) => (v > 1e-6 ? 20 * Math.log10(v) : -120);
+  return {
+    rmsDb: db(Math.sqrt(sum / (sig.length || 1))),
+    peakDb: db(peakAbs),
+    clipPct: sig.length ? (100 * clipped) / sig.length : 0,
+  };
 }
 
 // Normalized time-domain cross-correlation: the integer lag where ref best fits

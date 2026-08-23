@@ -119,3 +119,104 @@ def test_spread_is_reported_per_speaker():
     }))
     assert plan["tight"]["spreadMs"] == pytest.approx(0.2)
     assert plan["loose"]["spreadMs"] == pytest.approx(8.0)
+
+
+# --- telling three different failures apart ---------------------------------
+
+
+def probe_at(tof, peak, rms_db=None, clip_pct=None):
+    p = {"tofMs": tof, "peak": peak, "snr": 2.0}
+    if rms_db is not None:
+        p["rmsDb"] = rms_db
+    if clip_pct is not None:
+        p["clipPct"] = clip_pct
+    return p
+
+
+def test_a_dead_input_is_named_as_one_rather_than_blamed_on_the_room():
+    """July's failure, and the reason this exists: peak 0.02 against a mic at
+    -74 dBFS. "no usable capture" is true and useless — the fault was Windows."""
+    plan = by_id(plan_nudges({
+        "a": [probe_at(0.0, 0.02, rms_db=-74.0)] * 3,
+        "b": [probe_at(0.0, 0.03, rms_db=-76.0)] * 3,
+    }))
+    assert "mic heard nothing" in plan["a"]["note"]
+    assert "-74 dBFS" in plan["a"]["note"]
+    assert "check the input" in plan["a"]["note"]
+    assert plan["a"]["proposedMs"] is None
+
+
+def test_a_clipping_input_is_named_too():
+    """The other end of the same axis: loud enough to destroy the correlation."""
+    plan = by_id(plan_nudges({
+        "a": [probe_at(0.0, 0.05, rms_db=-3.0, clip_pct=14.0)] * 3,
+    }))
+    assert "clipping" in plan["a"]["note"]
+    assert "turn the mic gain down" in plan["a"]["note"]
+
+
+def test_a_live_mic_that_simply_missed_keeps_the_old_wording():
+    """Healthy level, no correlation: this one really is "we didn't hear it",
+    and the fix is in the room — placement, volume, a door left open."""
+    plan = by_id(plan_nudges({
+        "a": [probe_at(0.0, 0.04, rms_db=-32.0, clip_pct=0.0)] * 3,
+    }))
+    assert plan["a"]["note"] == "no usable capture"
+
+
+def test_level_is_reported_even_when_the_measurement_succeeds():
+    """It is a diagnostic on every row, not just a failure message — a sweep
+    that works at -55 dBFS is one bad evening away from not working."""
+    plan = by_id(plan_nudges({
+        "near": [probe_at(10.0, 0.8, rms_db=-30.0, clip_pct=0.0)] * 3,
+        "far": [probe_at(35.0, 0.7, rms_db=-55.0, clip_pct=0.0)] * 3,
+    }))
+    assert plan["near"]["rmsDb"] == -30.0
+    assert plan["far"]["rmsDb"] == -55.0
+    assert plan["near"]["proposedMs"] == 25.0      # still proposes as before
+
+
+def test_level_never_decides_whether_a_reading_is_accepted():
+    """Diagnostics only. A quiet capture that correlates cleanly is still a
+    measurement — the gate is `peak`, and this slice must not have moved it."""
+    quiet = by_id(plan_nudges({
+        "near": [probe_at(10.0, 0.9, rms_db=-70.0)] * 3,
+        "far": [probe_at(35.0, 0.9, rms_db=-70.0)] * 3,
+    }))
+    assert quiet["near"]["proposedMs"] == 25.0
+    assert quiet["near"]["note"] == ""
+
+
+def test_rows_without_level_data_behave_exactly_as_before():
+    """An older player page reports no level. It must not become an error."""
+    plan = by_id(plan_nudges({"silent": [probe_at(0.0, 0.01)] * 3}))
+    assert plan["silent"]["note"] == "no usable capture"
+    assert plan["silent"]["rmsDb"] is None
+
+
+# --- the level arrives over a socket, so it is untrusted input ---------------
+
+
+@pytest.mark.parametrize("raw,want", [
+    (-74.0, -74.0), ("-30.5", -30.5), (0.0, 0.0),
+    (12.0, 0.0),            # above full scale is impossible; clamp, don't reject
+    (-999.0, -120.0),       # floor
+    (None, None), ("", None), ("abc", None), ([], None),
+    (float("nan"), None), (float("inf"), None),
+])
+def test_clean_db_bounds_whatever_the_client_sends(raw, want):
+    from syncplay.conductor import _clean_db
+
+    got = _clean_db(raw)
+    assert got is None if want is None else got == pytest.approx(want)
+
+
+@pytest.mark.parametrize("raw,want", [
+    (0.0, 0.0), (14.0, 14.0), (250.0, 100.0), (-5.0, 0.0),
+    (None, None), ("nope", None), (float("nan"), None),
+])
+def test_clean_pct_bounds_whatever_the_client_sends(raw, want):
+    from syncplay.conductor import _clean_pct
+
+    got = _clean_pct(raw)
+    assert got is None if want is None else got == pytest.approx(want)

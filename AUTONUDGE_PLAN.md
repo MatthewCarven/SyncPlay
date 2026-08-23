@@ -1,6 +1,11 @@
 # Phase 1 plan — mic-based auto-nudge (time-of-flight per node)
 
-Status: **steps 1–3 of 4 shipped** (see the commit ladder below). All three were
+Status: **steps 1–3 of 4 shipped**, plus a diagnostics pass (2026-08-23) so a
+failed probe says *why*: capture level in dBFS rides with every result, because
+the normalized correlation peak cannot tell a dead microphone from a missed
+chirp. See the worklog entry of that date before the first hardware run — the
+`in level` column is the one that would have ended July in a minute.
+Original status line: **steps 1–3 of 4 shipped** (see the commit ladder below). All three were
 verified without a real mic — the arithmetic and the orchestration are proven,
 **the acoustic loop is not**. Step 4 (apply) is the remaining work, and it is
 deliberately last: proposals you can read are safe, proposals that apply

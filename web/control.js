@@ -475,7 +475,25 @@ function showMeasure(m) {
   const peak = (m.peak != null) ? ` · peak ${(+m.peak).toFixed(2)}` : "";
   const snr = (m.snr != null) ? ` · snr ${(+m.snr).toFixed(1)}` : "";
   $("measureOut").textContent =
-    `${m.speakerName} → mic: ToF ${(+m.tofMs).toFixed(2)} ms${peak}${snr}`;
+    `${m.speakerName} → mic: ToF ${(+m.tofMs).toFixed(2)} ms${peak}${snr}`
+    + ` · in ${levelText(m.rmsDb, m.clipPct)}`;
+}
+
+// The capture level, and what it means. `peak` is a normalized correlation, so
+// it says nothing about whether the mic was live — this is the cell that does.
+function levelText(rmsDb, clipPct) {
+  if (rmsDb === null || rmsDb === undefined) return "—";
+  const db = `${(+rmsDb).toFixed(0)} dBFS`;
+  if (rmsDb < -60) return `${db} (silent)`;
+  if (clipPct != null && clipPct >= 1) return `${db} (clipping)`;
+  return db;
+}
+
+function levelClass(rmsDb, clipPct) {
+  if (rmsDb === null || rmsDb === undefined) return "";
+  if (rmsDb < -60) return "closureBad";
+  if (clipPct != null && clipPct >= 1) return "closureWarn";
+  return "closureOk";
 }
 
 // --- calibration sweep (auto-nudge step 3) -----------------------------------
@@ -498,6 +516,7 @@ function showCalResult(m) {
       <td class="num">${r.tofMs === null || r.tofMs === undefined ? "—" : (+r.tofMs).toFixed(2)}</td>
       <td class="num">${(+r.spreadMs).toFixed(2)}</td>
       <td class="num">${r.peak == null ? "—" : `${(+r.peak).toFixed(2)}/${(+r.snr).toFixed(1)}`}</td>
+      <td class="num ${levelClass(r.rmsDb, r.clipPct)}" title="capture level at the mic during this speaker's reps. A normalized correlation peak cannot tell a dead input from a missed chirp; this can.">${levelText(r.rmsDb, r.clipPct)}</td>
       <td class="num">${r.nGood}/${r.nTotal}</td>
       <td class="num">${(+r.currentMs).toFixed(0)}</td>
       <td class="num ${ok ? "closureOk" : "closureBad"}">${

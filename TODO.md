@@ -188,6 +188,14 @@ the player audio path only when unavoidable, one commit per feature so
     changes, revertible on its own.
 
 - [ ] **Mic-based auto-nudge — step 4 of 4** (the live thread)
+  - **2026-08-23: a failed probe now names its own cause.** The correlation is
+    normalized, so `peak` measures shape, not level — it cannot distinguish a
+    dead input from a missed chirp, which is exactly the ambiguity that cost a
+    month in July. Capture RMS/peak dBFS + clipping now ride with every result;
+    an `in level` column shows them, and the failure note says "mic heard
+    nothing (-74 dBFS) - check the input, not the room" / "input clipping" /
+    "no usable capture" (which now genuinely means the room). Diagnostics only —
+    `CAL_MIN_PEAK` is still the only gate. **Needs a fleet reload** (`player.js`).
   - Spec + ladder in [AUTONUDGE_PLAN.md](AUTONUDGE_PLAN.md). Steps 1–3 shipped;
     the sweep now proposes a nudge per speaker on the control page.
   - Remaining: **apply**. Cheap — the control page fires the existing per-node
