@@ -161,7 +161,17 @@ function skewCellFor(n) {
       + (n.skewCredible
           ? "clears its own error bound — will be carried to the next session"
           : "inside its own error bound — measurement error alone could fake this,\nso it is used live but not banked");
-  return `<td class="num${n.skewCredible ? "" : " skewSoft"}" title="${esc(tip)}">${fmt(n.skewPpm, 1)}</td>`;
+  // The remembered value is a *different* number from the live fit, and it is
+  // the one that outlives the session — so it gets its own affordance, shown
+  // only when there is actually something to forget.
+  const rem = n.rememberedSkewPpm;
+  const forget = (rem === null || rem === undefined) ? "" :
+    ` <button class="forget" title="${esc(
+        `remembered: ${rem.toFixed(1)} ppm — carried into this node's next session.`
+        + "\nForget it. If this session is measuring a believable drift of its own,"
+        + "\nthat replaces it immediately; otherwise the node starts clean next time.")}"
+        onclick="forgetSkew('${n.id}')">⌫</button>`;
+  return `<td class="num${n.skewCredible ? "" : " skewSoft"}" title="${esc(tip)}">${fmt(n.skewPpm, 1)}${forget}</td>`;
 }
 
 function renderNodeTable() {
@@ -545,6 +555,7 @@ window.queueTrack = (trackId) => cmd({ cmd: "queue", trackId });
 window.unqueue = (index) => cmd({ cmd: "unqueue", index });
 window.moveQueue = (index, delta) => cmd({ cmd: "queueMove", index, delta });
 window.setNudge = (nodeId, v) => cmd({ cmd: "nudge", nodeId, nudgeMs: parseFloat(v) || 0 });
+window.forgetSkew = (nodeId) => cmd({ cmd: "forgetSkew", nodeId });
 window.setVol = (nodeId, v) => cmd({ cmd: "volume", nodeId, volume: parseInt(v, 10) });
 
 function esc(s) {

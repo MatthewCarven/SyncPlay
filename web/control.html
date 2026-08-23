@@ -98,6 +98,12 @@
   td.trustGood { color: var(--accent); }
   td.trustFair { color: var(--warn); }
   td.trustPoor { color: var(--bad); }
+  button.forget {
+    font: inherit; font-size: .7rem; line-height: 1; padding: 1px 4px;
+    color: var(--dim); background: none; border: 1px solid var(--edge);
+    border-radius: 4px; cursor: pointer; vertical-align: baseline;
+  }
+  button.forget:hover { color: var(--bad); border-color: var(--bad); }
   /* a drift we can't yet tell from measurement error: shown, not banked */
   td.skewSoft { color: var(--dim); }
   td.closureOk { color: var(--accent); }

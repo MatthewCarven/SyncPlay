@@ -1129,3 +1129,62 @@ confirmed before the browser ever saw it.
 path (`nudges` and `eqs` both delete their entry when cleared), so a bad value
 banked *before* this gate existed still outlives every session. Next slice.
 
+## 2026-08-23 (later) — a way out: forgetting a remembered drift
+
+Yesterday's gate stops a bad drift getting *in*. It does nothing about the ones
+already on disk — and `_state["skews"]` had no exit at all. `nudges` and `eqs`
+both `pop()` their entry when cleared; skews only ever grew, so one wrong value
+seeded that node's every future session with no way to say otherwise short of
+hand-editing the state file. `_clean_skew` filters at load, but only for junk and
+absurd magnitudes: a plausible-looking wrong number sails straight through.
+
+**Three things had to be cleared, and they are genuinely three.** The value the
+node will bank (`Node.prior_skew`), the entry on disk (`_state["skews"]`), and
+the prior the *live* `ClockModel` is coasting on. Clearing only the first two
+leaves the node steering on the bad number for the rest of the session, which is
+the very thing you clicked the button about. So `ClockModel.forget_prior()`
+drops it and invalidates the cached estimate — and it is inherently a no-op once
+the window fits a slope of its own, because a fit outranks a prior anyway. It
+bites in exactly one case: a node still coasting. That is the case worth fixing.
+
+**The behaviour worth knowing about before it surprises you.** `_save_state()`
+re-banks from live models, so forgetting on a node that is *right now* measuring
+a credible drift puts a value straight back. That is correct — a measurement
+beats a memory, and the new number was just verified against its own error bound
+— but it means the button looks like it did nothing on the best-behaved node in
+the room. So it says what happened out loud, in the toast and the log:
+`Forgot tablet's drift (was 130.0 ppm) - re-learned 20.1 ppm from this session.`
+Both outcomes are pinned by their own test rather than left to be discovered.
+
+**On the control page** the `⌫` appears in the drift cell *only* when there is
+something to forget — `rememberedSkewPpm` is non-null. That is deliberately a
+different number from the live fit next to it: a node can be measuring one drift
+and remembering another, and that divergence is precisely the state you want to
+be able to see and clear.
+
+**Known limit, and it's honest to state it:** you can only forget a node you can
+see. An entry for a device that never reconnects stays in the file — harmless,
+since a skew only ever seeds the node it belongs to, but not reachable from the
+page either.
+
+**Verified:** 217 tests, up from 211. Six new, driven through the real control-
+command surface with `STATE_FILE` monkeypatched to a tmp path (the live state
+file is never a test fixture): the entry actually leaves the file when the prior
+is cleared — the bug itself, pinned; forget clears all three places and the live
+estimate drops to 0.0 skew; a credible fit replaces rather than empties; an
+uncredible one leaves the node clean; an unknown node id is shrugged off without
+touching anyone else's entry; and `forget_prior` is a no-op once fitted.
+
+Live on `:8931`: the button is absent on a node with nothing remembered, appears
+with the right tooltip once `rememberedSkewPpm` is set, and emits exactly
+`{cmd: "forgetSkew", nodeId}`. End to end against the running conductor, the
+command logged `bench-c: forgot remembered drift (was nothing); nothing
+remembered now`. The real `syncplay_state.json` was backed up first and came
+through content-identical — skews, nudges, eqs and volumes all unchanged.
+
+`node --check web/control.js` earned its place again: the first draft of the
+button had the same broken-string-literal fault as yesterday's, and the syntax
+check caught it before the browser did.
+
+**Conductor + control only. `player.js` untouched, so no fleet reload.**
+

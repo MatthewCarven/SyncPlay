@@ -6,6 +6,17 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] **Forgetting a remembered drift** (2026-08-23) — `_state["skews"]` had no
+  exit: `nudges`/`eqs` pop their entry when cleared, skews only ever grew, so a
+  value banked before the gate existed seeded that node forever. Now `_save_state`
+  pops a cleared prior, and a `⌫` in the drift cell (shown only when there *is*
+  something remembered) clears all three places it lives — the node's
+  `prior_skew`, the state-file entry, and the live `ClockModel`'s inherited prior,
+  which is what stops it coasting on the bad number for the rest of the session.
+  Note `_save_state` re-banks from live models, so forgetting on a node currently
+  measuring a *credible* drift replaces rather than empties — correct, and the
+  toast says so. Limit: you can only forget a node you can see. 217 tests (6 new,
+  `STATE_FILE` monkeypatched — the live state file is never a fixture).
 - [x] **Fit-quality gate on `remember_skew`** (2026-08-23) — a fitted drift is
   only carried into the node's next session if it clears its own worst-case
   error by 2×. The bound is exact and falls out of the same sums the fit needs:
@@ -286,13 +297,7 @@ the player audio path only when unavoidable, one commit per feature so
     overwrites `_measure_pending` with no in-flight check, so the sweep's rep
     waits out `MEASURE_TIMEOUT` and is dropped — which is exactly what the flag
     exists to prevent. `_measure_all` guards itself; `_measure_one` doesn't.
-  - `_state["skews"]` is write-only. `nudges` and `eqs` both delete their entry
-    when cleared; skews never do, so one bad persisted value outlives every
-    session and can't be cleared from memory. `_clean_skew` only filters at load.
-    **Sharpened by the 2026-08-23 gate:** new bad values are now refused at the
-    door, but anything banked *before* it existed is still in the file with no
-    way out. Wants a control-page "forget this node's drift" and a `pop()` on
-    the cleared path — the same shape `nudges` already has.
+  - ~~`_state["skews"]` is write-only~~ — **done 2026-08-23**, see Done below.
   - ~~`remember_skew` will bank a slope fitted from a node *moving*~~ — **done
     2026-08-23**, see Done below. Not the residual/R² check this item asked for:
     a walk produces R² = 1.00000, so residuals are the one thing that cannot

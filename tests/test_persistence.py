@@ -7,6 +7,8 @@ into a "measurement", and a corrupt state file degrades to a cold start rather
 than to a confidently wrong one. Both are pinned here.
 """
 
+import asyncio
+
 import pytest
 
 from syncplay.conductor import MAX_PERSISTED_SKEW, Node, _clean_skew
@@ -228,3 +230,106 @@ def test_the_snapshot_says_whether_the_drift_is_believable():
         t = 600.0 * i / 40
         steady.model.add(leg_sample(t, 1.0 + 20e-6 * t, 0.0005, 0.0005))
     assert steady.stats(None)["skewCredible"] is True
+
+
+# --- forgetting: the way out of a value banked before there was a gate -------
+
+
+@pytest.fixture()
+def cond(tmp_path, monkeypatch):
+    """A conductor whose state file is a throwaway, never the real one."""
+    from syncplay import conductor as C
+
+    monkeypatch.setattr(C, "STATE_FILE", tmp_path / "state.json")
+    c = C.Conductor(tmp_path)
+    c._state = {"nudges": {}, "volumes": {}, "eqs": {}, "skews": {}}
+    return c
+
+
+def on_disk(cond):
+    import json
+    from syncplay import conductor as C
+
+    return json.loads(C.STATE_FILE.read_text("utf-8"))["skews"]
+
+
+def test_a_cleared_prior_actually_leaves_the_state_file(cond):
+    """The bug: `skews` only ever grew. nudges and eqs both pop; this didn't."""
+    node = Node("id-tablet", "tablet")
+    node.prior_skew = 41e-6
+    cond.nodes["id-tablet"] = node
+    cond._save_state()
+    assert on_disk(cond) == {"id-tablet": pytest.approx(41e-6)}
+
+    node.prior_skew = None
+    cond._save_state()
+    assert on_disk(cond) == {}
+
+
+def test_forget_clears_the_value_the_entry_and_the_live_prior(cond):
+    node = Node("id-phone", "phone")
+    node.prior_skew = 130e-6                       # nonsense from a past session
+    node.model = ClockModel(prior_skew=node.prior_skew)
+    node.model.add(sample(0.0, 1.0))               # something to estimate from
+    cond.nodes["id-phone"] = node
+    cond._state["skews"]["id-phone"] = 130e-6
+
+    asyncio.run(cond._on_control_cmd({"cmd": "forgetSkew", "nodeId": "id-phone"}))
+
+    assert node.prior_skew is None
+    assert node.model.prior_skew is None           # stops coasting on it *now*
+    assert node.model.estimate().skew == 0.0
+    assert on_disk(cond) == {}
+    assert node.stats(None)["rememberedSkewPpm"] is None
+
+
+def test_forget_on_a_node_measuring_its_own_drift_replaces_rather_than_empties(cond):
+    """`_save_state` re-banks from live models, so a credible fit lands straight
+    back. That is right — a measurement beats a memory — but it must be pinned,
+    or the button looks broken on exactly the best-behaved node in the room."""
+    node = Node("id-tablet", "tablet")
+    node.connected = True
+    node.prior_skew = 130e-6
+    node.model = ClockModel(prior_skew=node.prior_skew)
+    for i in range(41):
+        t = 600.0 * i / 40
+        node.model.add(leg_sample(t, 1.0 + 20e-6 * t, 0.0005, 0.0005))
+    cond.nodes["id-tablet"] = node
+    cond._state["skews"]["id-tablet"] = 130e-6
+
+    asyncio.run(cond._on_control_cmd({"cmd": "forgetSkew", "nodeId": "id-tablet"}))
+
+    assert node.prior_skew == pytest.approx(20e-6, rel=1e-2)   # the measured one
+    assert on_disk(cond)["id-tablet"] == pytest.approx(20e-6, rel=1e-2)
+
+
+def test_forget_on_an_uncredible_fit_leaves_the_node_clean(cond):
+    """The case the button exists for: nothing believable to replace it with."""
+    node = Node("id-phone", "phone")
+    node.connected = True
+    node.prior_skew = 130e-6
+    node.model = carried_across_the_room(span=60.0)
+    cond.nodes["id-phone"] = node
+    cond._state["skews"]["id-phone"] = 130e-6
+
+    asyncio.run(cond._on_control_cmd({"cmd": "forgetSkew", "nodeId": "id-phone"}))
+
+    assert node.prior_skew is None
+    assert on_disk(cond) == {}
+
+
+def test_forget_shrugs_off_an_unknown_node(cond):
+    cond._state["skews"]["id-ghost"] = 40e-6
+    asyncio.run(cond._on_control_cmd({"cmd": "forgetSkew", "nodeId": "id-nobody"}))
+    assert cond._state["skews"] == {"id-ghost": pytest.approx(40e-6)}
+
+
+def test_forget_prior_is_a_noop_once_the_window_fits_its_own_slope():
+    """Nothing to forget: the fit already outranks the prior."""
+    m = ClockModel(prior_skew=130e-6)
+    for i in range(41):
+        t = 600.0 * i / 40
+        m.add(leg_sample(t, 1.0 + 20e-6 * t, 0.0005, 0.0005))
+    before = m.estimate().skew
+    m.forget_prior()
+    assert m.estimate().skew == pytest.approx(before)

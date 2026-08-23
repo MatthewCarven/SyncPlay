@@ -227,6 +227,18 @@ class ClockModel:
     def __len__(self) -> int:
         return len(self._samples)
 
+    def forget_prior(self) -> None:
+        """Drop an inherited drift this window has not confirmed for itself.
+
+        A no-op once the window fits its own slope — the fit wins over the prior
+        anyway — so this only bites in the one case it is for: a node still
+        coasting on a remembered number that turned out to be wrong.
+        """
+        if self.prior_skew is None:
+            return
+        self.prior_skew = None
+        self._cache = None  # the cached estimate may have been built on it
+
     def add(self, sample: PingSample) -> None:
         """Ingest one exchange. Corrupt samples (negative RTT) are dropped."""
         if sample.rtt < 0.0:

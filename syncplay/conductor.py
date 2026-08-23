@@ -474,6 +474,13 @@ class Node:
             # its own bound is one measurement error could have invented.
             "skewBoundPpm": None,
             "skewCredible": False,
+            # What this node would carry into its next session right now, and so
+            # what the control page offers to forget. Independent of the live
+            # estimate above: a node can be measuring one drift and remembering
+            # another (that is exactly the state worth being able to clear).
+            "rememberedSkewPpm": (
+                None if self.prior_skew is None else self.prior_skew * 1e6
+            ),
             "nUsed": 0,
             "nSamples": len(self.model),
             "spanS": 0.0,
@@ -641,6 +648,11 @@ class Conductor:
                     n.remember_skew()
                 if n.prior_skew is not None:
                     self._state["skews"][n.client_id] = round(n.prior_skew, 12)
+                else:
+                    # Symmetry with nudges/eqs below, and the whole reason a
+                    # wrong drift used to be unclearable: without this, "forget"
+                    # could only ever stop *updating* the entry, never remove it.
+                    self._state["skews"].pop(n.client_id, None)
                 if n.nudge_ms:
                     self._state["nudges"][n.client_id] = n.nudge_ms
                 else:
@@ -1697,6 +1709,33 @@ class Conductor:
                 self._save_state()
                 await node.send({"type": "config", "nudgeMs": node.nudge_ms,
                                  "volume": node.volume, "eqDb": node.eq_db})
+                await self.push_state()
+        elif cmd == "forgetSkew":
+            # The escape hatch for a drift banked before there was a gate on it.
+            # Clears the remembered value, the state-file entry, and the live
+            # model's inherited prior — that last one is a no-op unless the node
+            # is still coasting on it, which is the case worth fixing.
+            node = self.nodes.get(str(data.get("nodeId")))
+            if node is not None:
+                had = node.prior_skew
+                node.prior_skew = None
+                node.model.forget_prior()
+                self._state["skews"].pop(node.client_id, None)
+                # _save_state re-banks from live models, so a node that is right
+                # now measuring a *credible* drift of its own will replace the
+                # value immediately. That is correct — a measurement beats a
+                # memory — but it must be said out loud, or the button looks
+                # broken to anyone who clicks it on a well-behaved node.
+                self._save_state()
+                was = "nothing" if had is None else f"{had * 1e6:.1f} ppm"
+                now_ = node.prior_skew
+                learned = (
+                    "nothing remembered now" if now_ is None
+                    else f"re-learned {now_ * 1e6:.1f} ppm from this session"
+                )
+                log.info("%s: forgot remembered drift (was %s); %s",
+                         node.name, was, learned)
+                await self.toast(f"Forgot {node.name}'s drift (was {was}) - {learned}.")
                 await self.push_state()
         elif cmd == "eq":
             node = self.nodes.get(str(data.get("nodeId")))
