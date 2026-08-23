@@ -53,6 +53,13 @@ ARM_SECONDS = 6.0         # visible countdown floor before a cold start
 PENDING_PING_TTL = 5.0
 MAX_QUEUE = 200           # sanity cap on the explicit play queue
 MAX_PERSISTED_SKEW = 500e-6  # 500 ppm; past this it's a bad fit, not a crystal
+# How far a fitted slope must clear its own worst-case error before we are
+# willing to carry it into the node's *next* session. 2x is deliberately modest:
+# this gate only decides what gets written to disk, and the live model keeps
+# using its fit either way, so the cost of refusing is one session of a node
+# re-learning its drift — against the cost of accepting, which is a wrong number
+# seeding every session after it.
+MIN_SKEW_SNR = 2.0
 
 # --- acoustic calibration (auto-nudge) -------------------------------------
 MEASURE_LEAD = 0.4        # how far ahead a chirp emit is scheduled
@@ -369,11 +376,34 @@ class Node:
         self.mic = False  # mic mode is per page-life; the client re-announces it
 
     def remember_skew(self) -> bool:
-        """Carry this session's measured drift forward. Only a real fit counts:
-        echoing an inherited prior straight back would let one bad reading
-        outlive every session after it. Returns whether anything was learned."""
+        """Carry this session's measured drift forward. Returns what was learned.
+
+        Two things disqualify a slope, and they are different failures:
+
+        - **It isn't ours.** `skew_fitted` is False when the slope is an
+          inherited prior rather than this window's own fit; re-banking it would
+          let one bad reading outlive every session after it.
+        - **It isn't distinguishable from measurement error.** A slope smaller
+          than `MIN_SKEW_SNR x` its own bound is one that path asymmetry alone
+          could have manufactured. The case this is really for is a device
+          *carried across the room*: that produces a clean, high-R^2 trend that
+          any residual-based check would happily bank, and it is not a crystal.
+
+        Persistence only. The live model goes on using its fit either way — this
+        decides what the node inherits *next* time, which is the value nobody is
+        watching when it turns out to be wrong.
+        """
         est = self.model.estimate()
         if est is None or not est.skew_fitted:
+            return False
+        if not est.skew_credible_at(MIN_SKEW_SNR):
+            log.info(
+                "%s: not banking %.1f ppm - inside its own error bound "
+                "(+/-%.1f ppm over %.0fs, %d samples); keeping %s",
+                self.name, est.skew_ppm, est.skew_bound_ppm, est.span, est.n_used,
+                "nothing" if self.prior_skew is None
+                else f"{self.prior_skew * 1e6:.1f} ppm",
+            )
             return False
         self.prior_skew = est.skew
         return True
@@ -439,6 +469,11 @@ class Node:
             "floorMs": None,
             "worstRttMs": None,
             "skewPpm": None,
+            # Worst-case error on skewPpm, and whether the fit clears it well
+            # enough to be carried into this node's next session. A drift inside
+            # its own bound is one measurement error could have invented.
+            "skewBoundPpm": None,
+            "skewCredible": False,
             "nUsed": 0,
             "nSamples": len(self.model),
             "spanS": 0.0,
@@ -449,6 +484,8 @@ class Node:
                 offsetMs=est.offset_at(now()) * 1000.0,
                 lastRttMs=est.last_rtt * 1000.0,
                 bestRttMs=est.best_rtt * 1000.0,
+                skewBoundPpm=est.skew_bound_ppm,
+                skewCredible=est.skew_credible_at(MIN_SKEW_SNR),
                 trustMs=est.trust_ms,
                 floorMs=est.floor_ms,
                 worstRttMs=est.worst_rtt * 1000.0,

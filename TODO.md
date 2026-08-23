@@ -6,6 +6,20 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] **Fit-quality gate on `remember_skew`** (2026-08-23) — a fitted drift is
+  only carried into the node's next session if it clears its own worst-case
+  error by 2×. The bound is exact and falls out of the same sums the fit needs:
+  bounded per-sample errors (`rtt_i/2`) move a least-squares slope by at most
+  `Σ|t−t̄|·(rtt/2) / Σ(t−t̄)²`. **Why not R²:** a device carried across the room
+  reads 83 ppm at **R² = 1.00000** — asymmetry sweeps as it walks, and the fit is
+  the cleanest in the file. Residual checks bank it; the bound refuses it (ratio
+  0.69) and still banks a real 20 ppm crystal (ratio 8.2). The impostor can't win
+  by lasting longer — ratio is invariant with span, because asymmetry is capped
+  by the round trip. **Persistence only:** the live model uses its fit either
+  way, so a refusal can't change how anything is timed today. `drift ppm` renders
+  dim until the fit clears its bound; refusals are logged with their numbers.
+  No fleet reload. 211 tests (10 new), including a constructed worst-case
+  adversary that must hit the bound exactly.
 - [x] The **± trust column** (2026-08-22) — every node's offset now shows the
   worst-case error the samples themselves certify. Asymmetry is bounded by the
   round trip, so a sample of round trip `rtt` proves `|offset error| <= rtt/2`;
@@ -275,12 +289,14 @@ the player audio path only when unavoidable, one commit per feature so
   - `_state["skews"]` is write-only. `nudges` and `eqs` both delete their entry
     when cleared; skews never do, so one bad persisted value outlives every
     session and can't be cleared from memory. `_clean_skew` only filters at load.
-  - `remember_skew` will bank a slope fitted from a node *moving* — someone
-    walking to the patio is a clean-looking trend over a 600 s window, and
-    `MAX_PERSISTED_SKEW` (500 ppm) is far too loose to catch it. It then seeds
-    that node's next session. Wants a minimum fit quality (residual RMS, or R²)
-    before banking, which is strictly better than a movement flag would have
-    been because it catches *every* bad fit, not just the moving kind.
+    **Sharpened by the 2026-08-23 gate:** new bad values are now refused at the
+    door, but anything banked *before* it existed is still in the file with no
+    way out. Wants a control-page "forget this node's drift" and a `pop()` on
+    the cleared path — the same shape `nudges` already has.
+  - ~~`remember_skew` will bank a slope fitted from a node *moving*~~ — **done
+    2026-08-23**, see Done below. Not the residual/R² check this item asked for:
+    a walk produces R² = 1.00000, so residuals are the one thing that cannot
+    tell them apart.
   - ~~`loadError` leaves `load_track`/`load_pct` set~~ — **fixed** in `e27f5a1`
     (2026-08-05); a failed load now retires the whole pill, not just its timer.
 

@@ -148,6 +148,22 @@ function trustCellFor(n) {
   return `<td class="num ${cls}" title="${esc(tip)}">±${n.trustMs.toFixed(2)}</td>`;
 }
 
+// Drift, with a note on whether it is yet distinguishable from measurement
+// error. Dim means "not a measured crystal" — either no slope has been fitted
+// (a prior, or a flat 0.0 on a young node) or the fit sits inside its own
+// bound, which is what a device being carried across the room looks like.
+// Only a bright number is one the node will inherit next session.
+function skewCellFor(n) {
+  if (n.skewPpm === null || n.skewPpm === undefined) return `<td class="num">—</td>`;
+  const tip = n.skewBoundPpm === null || n.skewBoundPpm === undefined
+    ? "no slope fitted yet — this is a prior or a flat zero, not a measurement"
+    : `fitted drift ${n.skewPpm.toFixed(1)} ppm, worst case ±${n.skewBoundPpm.toFixed(1)} ppm\n`
+      + (n.skewCredible
+          ? "clears its own error bound — will be carried to the next session"
+          : "inside its own error bound — measurement error alone could fake this,\nso it is used live but not banked");
+  return `<td class="num${n.skewCredible ? "" : " skewSoft"}" title="${esc(tip)}">${fmt(n.skewPpm, 1)}</td>`;
+}
+
 function renderNodeTable() {
   const rows = snap.nodes.map((n) => {
     // Decode outranks download: loadPct sits at 100 for the whole decode, so
@@ -168,7 +184,7 @@ function renderNodeTable() {
       <td class="num">${fmt(n.offsetMs, 2)}</td>
       ${trustCellFor(n)}
       <td class="num">${fmt(n.bestRttMs, 1)}</td>
-      <td class="num">${fmt(n.skewPpm, 1)}</td>
+      ${skewCellFor(n)}
       <td class="num"${ratePpm}>${err}</td>
       ${posCellFor(n)}
       <td class="num hideSm">${n.nUsed}/${n.nSamples}${

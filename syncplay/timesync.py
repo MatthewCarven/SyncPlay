@@ -102,6 +102,9 @@ class ClockEstimate:
     # Widest round trip that survived the RTT filter, i.e. the worst sample the
     # offset was actually computed from. Read-only bookkeeping for `trust`.
     worst_rtt: float = 0.0
+    # Worst-case error on `skew`, same units, 0.0 when no slope was fitted.
+    # See `skew_credible_at` for what it is for.
+    skew_bound: float = 0.0
 
     @property
     def skew_ppm(self) -> float:
@@ -128,6 +131,38 @@ class ClockEstimate:
     @property
     def trust_ms(self) -> float:
         return self.trust_s * 1000.0
+
+    @property
+    def skew_bound_ppm(self) -> float:
+        return self.skew_bound * 1e6
+
+    def skew_credible_at(self, ratio: float = 2.0) -> bool:
+        """Could this slope be an artefact of measurement error alone?
+
+        The same certificate that bounds the offset bounds the *slope* fitted
+        through a window of them. Perturbing each offset by e_i moves the
+        least-squares slope by `sum((t_i - t_mean) * e_i) / sum((t_i - t_mean)^2)`,
+        and every |e_i| is bounded by rtt_i/2 — so the worst case an adversary
+        could manufacture is `skew_bound`, computed exactly from the same sums
+        the fit already needs.
+
+        This matters because the dangerous bad fit is not a noisy one. A device
+        being *carried across the room* produces a beautifully clean trend: its
+        path asymmetry changes steadily, the offsets follow, and R^2 comes out
+        high. Residual-based quality checks wave that through. But a walk cannot
+        move the offset further than asymmetry allows, so an apparent drift that
+        exceeds `ratio x skew_bound` is one that measurement error *cannot*
+        fake — it has to be the crystal. That is the property worth testing
+        before believing a slope, and it catches every impostor, not just the
+        moving kind.
+
+        A perfect (rtt 0) window has `skew_bound == 0` and certifies any slope,
+        which is exactly right: with no measurement error there is nothing to
+        explain the trend away.
+        """
+        if not self.skew_fitted:
+            return False
+        return abs(self.skew) >= ratio * self.skew_bound
 
     @property
     def floor_ms(self) -> float:
@@ -221,6 +256,7 @@ class ClockModel:
 
         slope = 0.0
         fitted = False
+        slope_bound = 0.0
         if n >= self.min_slope_samples and span >= self.min_slope_span:
             # Least squares, centered for numerical stability.
             t_mean = sum(times) / n
@@ -234,6 +270,13 @@ class ClockModel:
                 # A "drift" beyond ±max_skew is a broken fit, not a real crystal.
                 slope = max(-self.max_skew, min(self.max_skew, slope))
                 fitted = True
+                # Worst-case slope error given each sample's own rtt/2 bound:
+                # the adversary aligns every error with (t - t_mean). Recorded,
+                # never acted on here — the live model uses the slope either
+                # way; only what gets *persisted* is gated on it.
+                slope_bound = sum(
+                    abs(t - t_mean) * s.rtt / 2.0 for t, s in zip(times, used)
+                ) / var
             anchor_t, anchor_y = t_mean, y_mean
         else:
             # Not enough span to trust a slope of our own. Fall back to the prior
@@ -255,6 +298,7 @@ class ClockModel:
             n_used=n,
             span=span,
             skew_fitted=fitted,
+            skew_bound=slope_bound,
         )
         return self._cache
 

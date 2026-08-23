@@ -98,6 +98,8 @@
   td.trustGood { color: var(--accent); }
   td.trustFair { color: var(--warn); }
   td.trustPoor { color: var(--bad); }
+  /* a drift we can't yet tell from measurement error: shown, not banked */
+  td.skewSoft { color: var(--dim); }
   td.closureOk { color: var(--accent); }
   td.closureWarn { color: var(--warn); }
   td.closureBad { color: var(--bad); }
@@ -146,7 +148,7 @@
         <th>node</th><th class="num">offset ms</th>
         <th class="num" title="worst-case error on the offset: half the widest round trip admitted to the fit. Path asymmetry cannot exceed the round trip, so this is a bound the samples certify - not an estimate of the noise.">&plusmn; ms</th>
         <th class="num">best rtt</th>
-        <th class="num">drift ppm</th><th class="num" title="live playback position error vs the conductor's ideal timeline">err ms</th>
+        <th class="num" title="clock drift in ppm. Dim = not yet distinguishable from measurement error, so it is used live but not carried to the next session.">drift ppm</th><th class="num" title="live playback position error vs the conductor's ideal timeline">err ms</th>
         <th title="where this node actually is in the song (read-only)">position</th>
         <th class="num hideSm" title="usable / total in the window — the model runs on the usable ones">samples</th>
         <th class="num">nudge ms</th><th>vol</th><th>state</th>

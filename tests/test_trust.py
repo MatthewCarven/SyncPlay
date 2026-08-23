@@ -165,3 +165,65 @@ def test_snapshot_carries_the_bound_and_admits_when_it_has_none():
     assert d["worstRttMs"] == pytest.approx(2.0)
     # The bound must describe the number sitting next to it in the same row.
     assert abs(d["offsetMs"] - 420.0) <= d["trustMs"] + 1e-6
+
+
+# --- the same certificate, applied to the slope --------------------------
+
+
+def test_slope_bound_matches_the_worst_case_an_adversary_could_build():
+    """`skew_bound` claims to be the largest slope error bounded errors can make.
+
+    So build that adversary: take a clean window, then push every offset by its
+    own full rtt/2 in the direction that tilts the line hardest. The slope must
+    move by the bound — no more (or the bound is a lie) and no less (or it is
+    loose enough to wave a real impostor through).
+    """
+    rtts = [0.002, 0.004, 0.003, 0.005, 0.002, 0.006, 0.003, 0.004,
+            0.002, 0.005, 0.003, 0.004]
+    times = [i * 20.0 for i in range(len(rtts))]
+    clean = [sample(t, 0.5, r / 2, r / 2) for t, r in zip(times, rtts)]
+    est = model_with(clean).estimate()
+    assert est.skew_fitted
+    assert est.skew == pytest.approx(0.0, abs=1e-12)   # symmetric legs: no tilt
+
+    t_mean = sum(times) / len(times)
+    tilted = []
+    for t, r in zip(times, rtts):
+        # All outbound early / all return early, whichever tilts this end up.
+        d_out = r if t >= t_mean else 0.0
+        tilted.append(sample(t, 0.5, d_out, r - d_out))
+    worst = model_with(tilted).estimate()
+    assert abs(worst.skew) == pytest.approx(est.skew_bound, rel=1e-9)
+
+
+def test_a_longer_window_earns_a_tighter_slope_bound():
+    """Same samples, same round trips, four times the span: the bound shrinks.
+
+    This is why waiting is the fix for an incredible fit rather than a filter
+    change — the error is fixed, the lever arm is not.
+    """
+    rtts = [0.003] * 12
+    short = model_with([sample(i * 5.0, 0.2, r / 2, r / 2)
+                        for i, r in enumerate(rtts)]).estimate()
+    long_ = model_with([sample(i * 20.0, 0.2, r / 2, r / 2)
+                        for i, r in enumerate(rtts)]).estimate()
+    assert long_.skew_bound == pytest.approx(short.skew_bound / 4.0, rel=1e-9)
+
+
+def test_an_unfitted_estimate_is_never_credible():
+    est = model_with([sample(i * 0.1, 0.2, 0.001, 0.001) for i in range(10)]).estimate()
+    assert not est.skew_fitted          # span far too short
+    assert est.skew_bound == 0.0
+    assert est.skew_credible_at(2.0) is False   # not "0 >= 0" — unfitted is unfitted
+
+
+def test_a_perfect_window_certifies_any_slope():
+    """rtt 0 leaves nothing to explain a trend away, so the gate must not bite.
+
+    The zero-delay exchange is how the persistence tests build their fixtures;
+    if this were False the gate would refuse every clean synthetic fit.
+    """
+    est = model_with([PingSample(t0=t, c1=t + 1.0 + 20e-6 * t, c2=t + 1.0 + 20e-6 * t,
+                                 t3=t) for t in (i * 5.0 for i in range(32))]).estimate()
+    assert est.skew_fitted and est.skew_bound == 0.0
+    assert est.skew_credible_at(2.0) is True

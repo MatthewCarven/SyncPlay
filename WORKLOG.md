@@ -1045,3 +1045,87 @@ correct, no console errors.
 **For meatthread0:** control page reload only, nodes can stay as they are. Worth
 one minute at the next play: read the tablet's `±` against its `err`.
 
+## 2026-08-23 — a fitted drift now has to clear its own error bound to be banked
+
+`remember_skew` would carry any fit it could get into the node's next session,
+and `MAX_PERSISTED_SKEW` (500 ppm) was the only thing standing in the way — which
+is to say nothing was, since every plausible impostor is well inside 500 ppm. The
+TODO asked for "a minimum fit quality (residual RMS, or R²)". I built something
+else, because **the dangerous bad fit is not a noisy one.**
+
+**The premise, and it's now a test.** A device carried across the room has a
+perfect clock and a changing *path*. Asymmetry sweeps as it moves, the offsets
+follow it, and the result is a straight line: over a 60 s window, an apparent
+**83 ppm** of drift at **R² = 1.00000**. Ordinary-crystal territory, textbook fit.
+Every residual- or R²-based quality gate waves that through — enthusiastically,
+because it is the cleanest data in the file. Then it seeds the node's next
+session, where nobody is watching.
+
+**What actually separates them is the certificate from yesterday's ± column.**
+Perturbing each offset by `e_i` moves the least-squares slope by
+`Σ(t_i − t̄)·e_i / Σ(t_i − t̄)²`, and every `|e_i|` is bounded by `rtt_i/2` — so
+the worst slope that measurement error alone could manufacture is exactly
+`Σ|t_i − t̄|·(rtt_i/2) / Σ(t_i − t̄)²`, computed from the same two sums the fit
+already needs. Call it `skew_bound`. A slope that **exceeds** it cannot be
+asymmetry, so it has to be the crystal. A slope **inside** it has proved nothing,
+however straight it looks.
+
+That is a proof obligation rather than a heuristic, and it catches every
+impostor, not just the walking kind — which is why it beats the movement flag
+that was considered and dropped back on 2026-08-02.
+
+**The numbers.** The walk above: 83.33 ppm against a bound of ±120.97 — ratio
+0.69, refused. A real 20 ppm tablet on a 1 ms link over ten minutes: bound
+±2.44 ppm, ratio **8.2**, banked. And the impostor cannot win by lasting longer:
+the same walk over 300 s and 600 s reads 16.7 and 8.3 ppm against bounds of 24.2
+and 12.5 — **ratio 0.69, 0.67, invariant**, because asymmetry is capped by the
+round trip so the fiction it can support shrinks exactly as fast as the bound
+does. What *does* earn a tighter bound is span: four times the window, a quarter
+of the bound, since the error is fixed and the lever arm isn't.
+
+**Scope, deliberately narrow.** This gates **persistence only**. The live model
+goes on using its fit either way, so a refusal cannot change how any node is
+timed this session — it decides what the node inherits *next* time, which is the
+value nobody is watching when it turns out to be wrong. Cost of refusing wrongly:
+one session of re-learning a drift. Cost of accepting wrongly: a wrong number
+seeding every session after it. Hence `MIN_SKEW_SNR = 2.0`, modest on purpose.
+
+**Made visible.** `drift ppm` now renders **dim** when the fit hasn't cleared its
+bound (or no slope has been fitted at all — a prior, or a young node's flat 0.0),
+bright when it has. Only a bright number is one the node will inherit. The
+tooltip gives the fit, the bound, and which side of the line it fell. The
+conductor also logs every refusal with its numbers, so a node that never banks
+anything says why.
+
+**Verified:** 211 tests, up from 201. The maths: an adversary is *constructed* —
+every offset pushed by its own full `rtt/2` in the direction that tilts the line
+hardest — and the resulting slope must equal `skew_bound` to 1e-9, so the bound
+is neither a lie (exceeded) nor slack (loose enough to admit an impostor). Then
+the policy: a walk is crystal-sized and R² 1.0 *and* refused; refused at three
+different spans; a real 20 ppm crystal still banked; a refusal leaves the
+previous value alone rather than clearing it; and an unfitted estimate is never
+credible (not "0 ≥ 0"). A zero-rtt window certifies any slope, which is right —
+with no measurement error there is nothing to explain a trend away — and is also
+what keeps every pre-existing synthetic fixture passing.
+
+Live on `:8931` with a joined node, and it produced the right answer on its own:
+a loopback node — whose "crystal" *is* the conductor's clock, so its true drift
+is zero — fitted **-0.2 ppm against a bound of +/-5.8 ppm** over a 225 s window,
+rendered dim, refused, and wrote **no skews entry**. All four cell states checked
+(no fit / walker / crystal / no data), and the conductor logged
+`bench-b: not banking -0.2 ppm - inside its own error bound (+/-5.0 ppm over
+225s, 821 samples); keeping nothing`.
+
+**One thing the live check caught that 211 green tests could not:** the first
+draft of the render carried a JS syntax error — a string literal broken across a
+line — and `control.js` did not parse at all. Every Python test still passed,
+because none of them load the page. `node --check web/control.js` is a one-second
+guard and belongs on every control-page slice; it is now how this one was
+confirmed before the browser ever saw it.
+
+**Conductor + control only. `player.js` untouched, so no fleet reload.**
+
+**Still open, and now more visible than it was:** `_state["skews"]` has no clear
+path (`nudges` and `eqs` both delete their entry when cleared), so a bad value
+banked *before* this gate existed still outlives every session. Next slice.
+
