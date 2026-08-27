@@ -270,6 +270,41 @@ the player audio path only when unavoidable, one commit per feature so
     `outputLatency`/`baseLatency`/sample-rate readout and the err-ms sparkline
     already listed under "More timing info" — both would have shown this.
 
+- [ ] **The mesh disappears silently — give an absent pair a reason**
+      (2026-08-27, observed live; conductor + control page, no fleet reload)
+  - Three completely different states render identically, as *no row*: a pair
+    that has no samples yet, a pair whose peers cannot reach each other at all,
+    and a pair whose channel formed and then died. On a phone hotspot the second
+    and third are routine, not corner cases.
+  - Observed: `laptop <-> phone` never appeared across ~10 minutes while the
+    other two pairs grew steadily — and there was no way to tell that from "not
+    sampled yet" without watching the table for ten minutes and inferring it.
+  - The conductor already holds `mesh_seen` (last report per pair) and reaps at
+    90 s, so *died* is nearly free — it is currently thrown away at exactly the
+    moment it becomes informative. *Never connected* needs the roster: every
+    ordered pair of mesh-capable nodes is expected, so anything in the roster
+    with no entry is either young or unreachable, and `_push_mesh_roster` knows
+    when it told them about each other.
+  - Suggested shape: keep a row for every expected pair, with a state — `n` and
+    a closure once it has them, "connecting" while young, "no channel" once it
+    has been long enough, and "lost Ns ago" for a reaped one. Same instinct as
+    the `errAgeS` work: a number with no freshness is worse than no number.
+  - Wants a party-relevant note in the UI, because this is exactly the failure a
+    room full of guest phones will produce.
+
+- [ ] **Two control sockets disagreed about the mesh** (2026-08-27, unexplained)
+  - A long-lived observer sampling every 15 s reported 2 mesh pairs for its whole
+    300 s run; two short-lived queries in the same window reported 0. A later
+    95 s sample at 2 s resolution showed 0 pairs and **zero transitions**, so it
+    was not flapping between samples.
+  - The tablet leaving explains an empty mesh at the *end* (both pairs involved
+    it), but not two simultaneous observers of the same `_broadcast_control`
+    fan-out disagreeing.
+  - Two candidates: the monitor's own change-detection was subtly wrong (likely,
+    and cheapest to rule out), or the snapshot's mesh contents can depend on
+    which socket is asking (a real bug). Worth ten minutes with two sockets and
+    a diff next time devices are up.
+
 - [ ] **The laptop<->phone mesh pair is missing on the hotspot setup**
       (noticed 2026-08-27; may be a finding rather than a gap)
   - Fleet was laptop + phone + "Mums tablet", with the **phone acting as the

@@ -1660,3 +1660,70 @@ sleep" is not a fix that survives contact with a party: a room full of guest
 phones will sleep constantly. The HTTPS/Wake Lock item under Later/maybe is the
 thing that would reduce the *frequency*; this commit is what makes the frequency
 not matter.
+
+## 2026-08-27 (cont.) — a live look at a hotspot fleet, and one thing I got wrong
+
+Matthew put three devices up — laptop, phone, and a borrowed newer tablet ("Mums
+tablet") — with **the phone acting as the access point** and the other two as its
+clients. Conductor on the laptop. First time these tools have been pointed at a
+live fleet from inside the sandbox: read-only observer on `/ws/control`, no
+commands sent. Session ended when the tablet had to go back, so nothing was
+played and `err ms` / `audioClockPpm` were never exercised on real hardware.
+
+**What was established.**
+
+- **`ID10TError-Laptop1 <-> Id10terror-phone` never formed a mesh pair.** Not
+  slow — absent across ~10 minutes, while `tablet<->laptop` grew n=38 -> 59 and
+  `tablet<->phone` grew n=12 -> 25 in the same window. So client-to-client
+  worked (traffic transiting the phone) while client-to-**AP host** did not.
+  That is the opposite of classic AP isolation and points at the phone being
+  fine at *forwarding* UDP while unreachable as a WebRTC peer on its own hotspot
+  interface. Matthew's own read — "my phone as access point dropping packets of
+  specific types" — fits the evidence better than anything I had.
+- **Mesh closure blew out to -185.72 / -186.09 ms on both tablet pairs**, having
+  read -0.23 / +0.09 ms minutes earlier. Two orders of magnitude, on the pair
+  models only; the star (WebSocket) path stayed healthy throughout. Unexplained,
+  and worth catching properly next time.
+- **The newer tablet was no better than the old one.** 167-171 used out of
+  ~4676 in the window = **3.6% survival**, ping boost pinned at 4.0x. The old
+  tablet ran 7.4%. Whatever costs a tablet its samples, it is not device age —
+  which retires the theory the last session parked the whole thread on.
+- **The phone still carries the -500 ppm prior.** Live fit +10.01 ppm with a
+  bound of +/-36.04, so `skew_credible_at` says False — meaning `remember_skew`
+  will *decline to replace it*, and the poison survives the session. The
+  `_clean_skew` fix committed today refuses it on load, but the running
+  conductor predates that commit. Either restart it or hit ⌫ on the phone;
+  ⌫ genuinely empties here rather than replacing, precisely because the live fit
+  is not credible.
+- Nobody's drift was credible: laptop -0.01 (bound 2.70), phone +10.01 (36.04),
+  tablet +13.22 (34.42). Bounds run `~rtt/span`, and with spans of 177-282 s and
+  rtts of 2-8 ms that is 27-36 ppm. Correct behaviour, but it means a short
+  session banks nothing at all.
+
+**What I got wrong, and it is worth writing down because the reasoning was
+seductive.** I reported the fleet was "barely pinging while idle" — laptop +6
+samples in 75 s against an expected few hundred, phone and tablet +0. That was
+wrong. `ClockModel(window=600.0)` is a **sliding 600-second window**, so a node
+that has been up longer than that has a *saturated* counter: samples enter and
+leave at the same rate and `len()` plateaus. The laptop's 2160 samples over a
+599 s span works out to 3.6/s against an expected `BURST_GAP` cadence of 10
+pings per 2.7 s = 3.7/s. It was pinging perfectly. I read a full buffer as a
+stalled loop, and the lesson is that `nSamples` is only a rate proxy *before*
+the window fills.
+
+**One thing left genuinely unexplained.** Two control sockets observing the same
+`_broadcast_control` fan-out disagreed about the mesh: a long-lived monitor
+sampling every 15 s saw 2 pairs for its whole 300 s run, while short-lived
+queries in the same period saw 0, twice. A later 95-second sample at 2 s
+resolution found 0 pairs and **zero transitions**, so it was not flapping. The
+tablet leaving explains the mesh being empty at the end — both pairs involved
+it — but not two simultaneous observers disagreeing. Either the monitor's
+comparison logic is subtly wrong, or the mesh table's contents can depend on
+which socket is asking, and the second would be a real bug. Not chased; the
+fleet went away first.
+
+**The product finding underneath all of this: the mesh disappears silently.**
+A pair that never connected, a pair with no samples yet, and a pair whose
+channel died are all rendered identically — as no row at all. The mesh's entire
+job is to be the independent referee, and it can vanish without saying so. On a
+phone hotspot that is not a rare corner: it is Tuesday.
