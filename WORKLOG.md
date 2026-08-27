@@ -1319,3 +1319,60 @@ green and the peaks are still low, that is a genuine acoustic miss and worth
 chasing — placement, speaker volume, a door. Either way you now get an answer
 rather than a mystery.
 
+
+## 2026-08-27 — the tablet's `err`, re-measured: the ± test doesn't decide it
+
+Matthew posted a live control panel and two mesh-truth snapshots, with one
+observation: the tablet "tends to get most of its samples during file transfer,
+like timing data". That line is what made the session worth having — it sent me
+to check whether sample clustering was corrupting the tablet's fit, and on the
+way there I found that the test the TODO had been saving up for this moment
+cannot answer the question it was built for.
+
+**The mesh certifies every drift figure, including the tablet's.** The two
+snapshots are one measurement with six constraints and a single free parameter
+(the interval between them). Fitting that one number gives 467 s and leaves
+residuals of at most 0.25 ms across all six pairs:
+
+    laptop<->pc      10.75 measured   10.55 predicted   +0.20
+    phone<->pc        6.52             6.77             -0.25
+    laptop<->phone    3.73             3.78             -0.05
+    pc<->tablet      -0.99            -1.17             +0.18
+    phone<->tablet    5.64             5.60             +0.04
+    laptop<->tablet   9.36             9.38             -0.02
+
+The pair `ClockModel`s share no conductor-clock data — WebRTC DataChannel pings,
+peer to peer — so this is the independent referee the sync-engine item wanted,
+used here for the first time in anger. It pins the tablet's slope to well under
+1 ppm, which retires the clustering worry directly: `trust_s` bounds the offset
+at `t_mean` and says so in its own docstring, so a node whose samples bunch up
+pays an extrapolation cost of `skew_bound x (now - t_mean)` that the ± column
+does not show. For this tablet that term is under 0.5 ms even across the whole
+7.8 minutes. The slope is fine. The clustering costs survival rate, not accuracy.
+
+**`err ms` is nudge-invariant, and that is the finding.** `nudgeMs` enters
+through `perfToCtx(atNodeMs + nudgeMs)` in both `startBuffer` and `onSteer`, and
+falls straight out of the difference:
+
+    posAt(targetCtx) - ideal = seekS + (C2 - C1 + (A2 - A1)/1000) * rate - ideal
+
+No `N`. This is correct and deliberate — a nudge is a fixed acoustic offset and
+the servo must not spend its rate trim fighting one — but it means the TODO's
+hypothesis 1 ("parks at +6.5 -> constant output latency, fix is a nudge") was
+never coherent as written. A nudge moves when sound leaves the speaker; `err`
+is computed in a frame where that move is invisible. So the ±-column test —
+*outside the bound -> it's real latency -> nudge it* — decides nothing, because
+the second arrow doesn't exist. **Do not nudge the tablet.** There would be no
+way to verify it and the number would go on reading 6.
+
+**What survived the cancellation is the better lead.** `C2 - C1` is the drift of
+the node's own `getOutputTimestamp` mapping between two steers, and it enters
+`err` at full weight. `err ms` is the *last* steerAck, not an average, and at
+6 ms the servo pulls 400 ppm against an 800 ppm cap — not saturated, and enough
+to null 6 ms in ~15 s. So something re-injects it faster than the servo removes
+it, and a coarsely-quantised output timestamp on an Android tablet is exactly
+the shape of thing that would. Hypothesis, not a finding: it needs the mapping
+logged, not reasoned about.
+
+Nothing was changed on the fleet and no code was touched. The TODO item has been
+rewritten to say what it now knows.

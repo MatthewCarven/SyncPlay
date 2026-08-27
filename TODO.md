@@ -233,30 +233,42 @@ the player audio path only when unavoidable, one commit per feature so
     should be `flat` (v1 median-only, no drift) as the *control* — you already
     know what it must do to the numbers.
 
-- [ ] **Settle what the tablet's `err` actually is** (one minute of watching,
-      then either a one-field change or nothing)
-  - Observed 2026-07-28 mid-song: tablet `err` +6.5 ms while laptop/pc/phone
-    all sat within ±0.5 ms. Sign convention in `onSteer` is `+ = we're ahead`,
-    so it was playing early. Its nudge was 0 at the time.
-  - Two very different causes produce that, and one screenshot can't separate
-    them. **Parks at +6.5** → constant output latency the `getOutputTimestamp`
-    mapping isn't catching; fix is a nudge. **Swings through zero to −5 or so**
-    → its offset estimate was wobbling on 39 surviving samples out of 726 and
-    the servo was chasing a moving reference; fix was the adaptive cadence, and
-    a nudge would be actively wrong because you'd be biasing against a number
-    that averages to zero.
-  - The adaptive cadence (shipped same day) may well have already fixed the
-    second case, so **re-measure before concluding anything** — the +6.5 was
-    recorded at 1.00× cadence, which no longer exists for that node.
-  - **The ± column (shipped 2026-08-22) now separates them in one glance**, which
-    is what the two hypotheses were waiting for. Read `err ms` against `±`:
-    *inside* the bound → the servo is chasing measurement noise and a nudge
-    would bias against a number that averages to zero; *outside* it → the offset
-    estimate cannot explain the displacement, so it is real output latency and
-    a nudge is right. Tablet `best rtt` ~3.8 ms implies a bound near ±2 ms, and
-    +6.5 sits well outside — but that reading predates the adaptive cadence, so
-    re-measure before acting.
-  - Cheapest possible test: watch those two cells for a minute.
+- [ ] **The tablet's `err`: measured 2026-08-27, and the question changed**
+  - Re-measured mid-song at 4.0x cadence: tablet `err` **+6.0 ms** against
+    **±3.02**, laptop/pc/phone all inside their bounds. July's reading was +6.5
+    at 1.0x cadence, so the adaptive cadence did not move it.
+  - **The ±-column test this item was waiting for does not decide it.** `err ms`
+    is *nudge-invariant* — `nudgeMs` enters via `perfToCtx(atNodeMs + nudgeMs)`
+    in **both** `startBuffer` and `onSteer` and cancels out of `errS` entirely.
+    That is deliberate (the servo must not spend rate trim fighting a fixed
+    acoustic offset), but it kills the old hypothesis 1 as written: a nudge
+    shifts when sound leaves the speaker and leaves this number reading 6.0.
+    So *outside the bound -> real output latency -> nudge it* has no second
+    arrow. **Do not nudge the tablet** — unverifiable, and `err` would still
+    accuse it.
+  - **The drift is not the problem.** Two mesh-truth snapshots 467 s apart fit
+    all four `drift ppm` figures across six pairs with residuals <= 0.25 ms
+    (worklog 2026-08-27). The mesh pair models hold no conductor-clock data, so
+    that is an independent referee, and it pins the tablet's 20.1 ppm to well
+    under 1 ppm.
+  - **Matthew's observation, which started this:** the tablet gets most of its
+    surviving samples *during file transfer* (121/1636 = 7.4%). That explains
+    the survival rate and the wide ±, not the 6.0 — `rtt/2` is a hard per-sample
+    bound, so transfer-window asymmetry caps at 3.02 ms however systematic it
+    is. Worth knowing anyway: `trust_s` bounds the offset **at `t_mean`**, and
+    a clustered node pays an unshown `skew_bound x (now - t_mean)` on top. Here
+    that is < 0.5 ms; on a node with a worse slope it would not be.
+  - **Leading candidate now:** what survives the nudge cancellation is
+    `C2 - C1`, the drift of the node's own `getOutputTimestamp` mapping between
+    two steers, which enters `err` at full weight. `err ms` is the *last*
+    steerAck, not an average, and at 6 ms the servo pulls 400 ppm against an
+    800 ppm cap — so it is not saturated, and something re-injects the error
+    faster than the ~15 s it needs to null it. A coarsely-quantised output
+    timestamp on an Android tablet has that shape.
+  - **Next test is no longer a stare.** Log the tablet's `C` (the `perfToCtx`
+    mapping constant) per steer and see whether it steps. Pairs with the
+    `outputLatency`/`baseLatency`/sample-rate readout and the err-ms sparkline
+    already listed under "More timing info" — both would have shown this.
 
 - [ ] **Spread the join burst across more than one radio window** (partly
       mitigated by the armed cold start; still open for mid-song joins)
