@@ -20,11 +20,17 @@ def sample(t: float, offset: float) -> PingSample:
     return PingSample(t0=t, c1=t + offset, c2=t + offset, t3=t)
 
 
-def feed(model: ClockModel, skew: float, start: float, span: float, n: int) -> None:
-    """n evenly spaced samples along a clean line of the given drift."""
+def feed(model: ClockModel, skew: float, start: float, span: float, n: int,
+         offset: float = 0.0) -> None:
+    """n evenly spaced samples along a clean line of the given drift.
+
+    `offset` displaces the whole run, so two calls with different values build a
+    *step* in the series — which is what a device suspending and resuming does,
+    and the one shape a least-squares slope cannot survive.
+    """
     for i in range(n):
         t = start + span * i / max(1, n - 1)
-        model.add(sample(t, 1.0 + skew * (t - start)))
+        model.add(sample(t, 1.0 + offset + skew * (t - start)))
 
 
 # --- Node.remember_skew ----------------------------------------------------
@@ -86,9 +92,27 @@ def test_a_wrong_prior_cannot_outlive_one_good_session():
 # --- _clean_skew: the state file is untrusted input -------------------------
 
 
-@pytest.mark.parametrize("good", [0.0, 20e-6, -20e-6, MAX_PERSISTED_SKEW])
+@pytest.mark.parametrize("good", [0.0, 20e-6, -20e-6, MAX_PERSISTED_SKEW * 0.99])
 def test_clean_skew_accepts_plausible_crystals(good):
     assert _clean_skew(good) == pytest.approx(good)
+
+
+@pytest.mark.parametrize("clamped", [MAX_PERSISTED_SKEW, -MAX_PERSISTED_SKEW])
+def test_clean_skew_refuses_the_clamp_value_itself(clamped):
+    """Deliberately flipped 2026-08-27, on live evidence: this parameter used to
+    sit in the "plausible crystals" list above, on the reasonable-looking view
+    that the bound should be inclusive.
+
+    It should not be. `ClockModel` clamps a runaway slope to *exactly* this
+    value, so it is not the last believable crystal — it is the fingerprint of a
+    broken fit, and the one number this filter most needs to refuse. Two of them
+    were found banked in the live state file at -500.000000 ppm after a phone
+    suspended its AudioContext and woke again: a step in the offset series, and
+    a least-squares line through a step has an enormous slope.
+
+    A real oscillator landing on the bound to the last significant digit does
+    not happen. A saturated fit lands there every single time."""
+    assert _clean_skew(clamped) is None
 
 
 @pytest.mark.parametrize(
@@ -333,3 +357,50 @@ def test_forget_prior_is_a_noop_once_the_window_fits_its_own_slope():
     before = m.estimate().skew
     m.forget_prior()
     assert m.estimate().skew == pytest.approx(before)
+
+
+# --- a saturated fit is not a crystal, and must not outlive the session ------
+
+
+def test_a_saturated_fit_is_flagged():
+    """The clamp keeps a runaway slope out of today's timing; the flag is what
+    keeps it out of tomorrow's."""
+    m = ClockModel()
+    # A step in the middle of the window: exactly what a phone suspending and
+    # resuming its AudioContext does to the offset series.
+    feed(m, skew=0.0, start=0.0, span=60.0, n=16)
+    feed(m, skew=0.0, start=60.0, span=60.0, n=16, offset=0.5)
+    est = m.estimate()
+    assert est.skew_fitted
+    assert est.skew_saturated, "a line through a 0.5 s step must hit the clamp"
+    assert abs(est.skew) == pytest.approx(MAX_PERSISTED_SKEW)
+
+
+def test_a_saturated_fit_is_never_banked():
+    node = Node("id-sleeper", "phone")
+    node.model = ClockModel()
+    feed(node.model, skew=0.0, start=0.0, span=60.0, n=16)
+    feed(node.model, skew=0.0, start=60.0, span=60.0, n=16, offset=0.5)
+    assert node.model.estimate().skew_saturated
+    assert node.remember_skew() is False
+    assert node.prior_skew is None, "the clamp must not be carried to next join"
+
+
+def test_a_saturated_fit_does_not_replace_a_good_prior():
+    """The failure that actually bit: a node with a believable drift on record
+    sleeps once, fits the clamp, and would otherwise overwrite the good value
+    with the bad one on the way out."""
+    node = Node("id-sleeper", "phone")
+    node.prior_skew = 20e-6
+    node.model = ClockModel(prior_skew=20e-6)
+    feed(node.model, skew=0.0, start=0.0, span=60.0, n=16)
+    feed(node.model, skew=0.0, start=60.0, span=60.0, n=16, offset=0.5)
+    node.end_session()
+    assert node.prior_skew == pytest.approx(20e-6)
+
+
+def test_an_ordinary_crystal_is_not_flagged_saturated():
+    m = ClockModel()
+    feed(m, skew=20e-6, start=0.0, span=120.0, n=32)
+    est = m.estimate()
+    assert est.skew_fitted and not est.skew_saturated

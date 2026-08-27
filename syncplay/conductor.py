@@ -163,7 +163,11 @@ def _clean_skew(v) -> Optional[float]:
         s = float(v)
     except (ValueError, TypeError):
         return None
-    if not math.isfinite(s) or abs(s) > MAX_PERSISTED_SKEW:
+    # `>=`, not `>`: the fit clamps a runaway slope to exactly this value, so
+    # the number this filter most needs to refuse is the one a `>` admits. A
+    # real crystal landing on the bound to the last digit does not happen; a
+    # saturated fit lands there every time.
+    if not math.isfinite(s) or abs(s) >= MAX_PERSISTED_SKEW:
         return None
     return s
 
@@ -486,6 +490,22 @@ class Node:
         """
         est = self.model.estimate()
         if est is None or not est.skew_fitted:
+            return False
+        if est.skew_saturated:
+            # A clamped slope is not a fast crystal. The usual cause is a step
+            # in the offset series - a phone that slept and woke - and banking
+            # it would seed this node at the clamp for the ~30 s of its next
+            # join before it has span to fit its own, walking `offset_at` at
+            # 0.5 ms per second the whole time.
+            log.warning(
+                "%s: not banking %.1f ppm - the fit saturated (%.0f ppm clamp) "
+                "over %.0fs, %d samples; this is a step in the series, not a "
+                "crystal. Keeping %s",
+                self.name, est.skew_ppm, MAX_PERSISTED_SKEW * 1e6, est.span,
+                est.n_used,
+                "nothing" if self.prior_skew is None
+                else f"{self.prior_skew * 1e6:.1f} ppm",
+            )
             return False
         if not est.skew_credible_at(MIN_SKEW_SNR):
             log.info(

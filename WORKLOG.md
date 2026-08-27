@@ -1599,3 +1599,64 @@ itself. The estimator's exoneration is the one worth remembering: the code's own
 which is *identically* the node's own ± bound. The trust column turns out to
 bound the servo as well as the offset, which nobody designed and which is now
 the cheapest way to tell a servo problem from an estimator one.
+
+## 2026-08-27 (cont.) — a saturated fit is not a crystal
+
+Matthew's phone showed `drift ppm` of **-500.0** with a ⌫ beside it, then
+recovered to +9.2 ppm a few minutes later once its sample count climbed from
+31/59 to 493/1138. His read was right and is the whole mechanism: the phone had
+been asleep. A suspended AudioContext puts a **step** in the offset series, and
+a least-squares line through a step has an enormous slope — `max_skew` clamped
+it to exactly 500 ppm.
+
+The transient was harmless. **Banking it was not.** Two entries in the live
+state file were `-500.000000 ppm`, exactly the clamp:
+
+    id-1784195976462-d8hutijpl0j    -500.000 ppm
+    id-925077ba338418ed5ab25cac816  -500.000 ppm
+
+`timesync.py:282` already says what that number means — *"A 'drift' beyond
+±max_skew is a broken fit, not a real crystal"* — clamps it, and then
+`remember_skew` banked it anyway. **The credibility gate cannot catch this, and
+it is worth being precise about why:** `skew_credible_at` tests
+`abs(skew) >= MIN_SKEW_SNR * skew_bound`, which rejects slopes too *small* to
+separate from their own error bound. A saturated slope is the opposite failure —
+it dwarfs every bound and sails through the gate untouched. The gate built to
+catch a device carried across the room is blind to a device that fell asleep.
+
+Cost of the poison, had it stood: on each rejoin the prior seeds the model, and
+until 30 s of span accumulates `slope = self.prior_skew`, so the node runs at
+-500 ppm — `offset_at()` walking 0.5 ms per second, and 15 s x 500 ppm = 7.5 ms
+of standing servo droop if playback starts in that window. Worse than the tablet
+reading that started this whole thread.
+
+**Two ends, both closed.**
+
+- `ClockEstimate` gains `skew_saturated`, set when the fit hits the clamp, and
+  `remember_skew` refuses on it with a warning naming the numbers. The clamp
+  keeps a runaway slope out of *today's* timing; the flag is what keeps it out
+  of tomorrow's.
+- `_clean_skew` now refuses `abs(s) >= MAX_PERSISTED_SKEW` rather than `> `. The
+  bug was that the load filter and the fit clamp are the *same number*, so the
+  one value the filter most needed to refuse was precisely the one `>` admitted.
+  This retires the two already on disk without editing anyone's state file.
+
+**A pinned test was deliberately flipped**, and it deserves flagging rather than
+burying: `test_clean_skew_accepts_plausible_crystals` had `MAX_PERSISTED_SKEW`
+in its "good" list, on the reasonable-looking view that the bound should be
+inclusive. It should not be. A real oscillator does not land on the bound to the
+last significant digit; a saturated fit lands there every time. The parameter
+moved into a new test that asserts the opposite, carrying the live evidence in
+its docstring.
+
+Note the live estimate is deliberately left alone — a clamped slope is still
+better than an unclamped one for *today's* timing, and this changes only what
+outlives the session. Same principle as the fit-quality gate in `e2689bc`.
+
+269 tests (6 new). Conductor + timesync only — **no fleet reload.**
+
+**Not Matthew's fault, and worth saying so in the record**, because "don't let it
+sleep" is not a fix that survives contact with a party: a room full of guest
+phones will sleep constantly. The HTTPS/Wake Lock item under Later/maybe is the
+thing that would reduce the *frequency*; this commit is what makes the frequency
+not matter.

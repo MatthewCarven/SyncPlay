@@ -105,6 +105,14 @@ class ClockEstimate:
     # Worst-case error on `skew`, same units, 0.0 when no slope was fitted.
     # See `skew_credible_at` for what it is for.
     skew_bound: float = 0.0
+    # True when the fit hit `max_skew` and had to be clamped. That is not a fast
+    # crystal, it is a broken fit — the usual cause is a step in the offset
+    # series (a phone suspending its AudioContext and waking again), and a
+    # least-squares line through a step has an enormous slope. Recorded because
+    # the credibility gate cannot see it: `skew_credible_at` rejects slopes too
+    # *small* to separate from their own error bound, and a saturated slope is
+    # the opposite failure — it dwarfs every bound and sails straight through.
+    skew_saturated: bool = False
 
     @property
     def skew_ppm(self) -> float:
@@ -269,6 +277,7 @@ class ClockModel:
         slope = 0.0
         fitted = False
         slope_bound = 0.0
+        saturated = False
         if n >= self.min_slope_samples and span >= self.min_slope_span:
             # Least squares, centered for numerical stability.
             t_mean = sum(times) / n
@@ -280,6 +289,9 @@ class ClockModel:
                 )
                 slope = cov / var
                 # A "drift" beyond ±max_skew is a broken fit, not a real crystal.
+                # Clamping keeps it from poisoning today's timing; `saturated`
+                # is what stops it being carried into tomorrow's.
+                saturated = abs(slope) >= self.max_skew
                 slope = max(-self.max_skew, min(self.max_skew, slope))
                 fitted = True
                 # Worst-case slope error given each sample's own rtt/2 bound:
@@ -311,6 +323,7 @@ class ClockModel:
             span=span,
             skew_fitted=fitted,
             skew_bound=slope_bound,
+            skew_saturated=saturated,
         )
         return self._cache
 
