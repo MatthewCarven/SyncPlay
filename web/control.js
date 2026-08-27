@@ -174,6 +174,47 @@ function skewCellFor(n) {
   return `<td class="num${n.skewCredible ? "" : " skewSoft"}" title="${esc(tip)}">${fmt(n.skewPpm, 1)}${forget}</td>`;
 }
 
+// `err ms` is the servo's own opinion, and it has two failure modes that look
+// identical in a single number: a *frozen* reading (the ack stream died and this
+// is a memory) and a *settled* one. The conductor now stamps both, so this cell
+// can refuse to be read the wrong way.
+//
+// The tooltip carries the interpretation, because the number is not a fault
+// report. The servo is proportional-only, so a settled error is 15 s x whatever
+// rate playback is slipping at — and the node's own rate trim measures that
+// rate directly. Subtract the drift the conductor already knows about and what
+// remains is the node's audio clock against its own CPU clock.
+function errCellFor(n, err) {
+  if (!n.playing) return `<td class="num">${err}</td>`;
+  if (n.errStale) {
+    const age = (n.errAgeS === null || n.errAgeS === undefined) ? "?" : n.errAgeS.toFixed(0);
+    const tip = [
+      `no steerAck for ${age} s - this node claims to be playing but has`,
+      "stopped answering the servo. The number beside it is the last thing",
+      "it said, not what it is doing now. Read nothing into its steadiness.",
+    ].join("\n");
+    return `<td class="num errStale" title="${esc(tip)}">${err}?</td>`;
+  }
+  const lines = [];
+  if (n.ratePpm !== null && n.ratePpm !== undefined) {
+    lines.push(`servo rate: ${n.ratePpm >= 0 ? "+" : ""}${n.ratePpm.toFixed(0)} ppm`);
+  }
+  if (n.audioClockPpm !== null && n.audioClockPpm !== undefined) {
+    lines.push(`settled ${n.runS.toFixed(0)} s. The servo has no integral term, so this`);
+    lines.push(`error is it holding off ${(-n.ratePpm).toFixed(0)} ppm of slip - of which`);
+    lines.push(`${n.skewPpm.toFixed(1)} ppm is clock drift the conductor already steers for.`);
+    lines.push(`Unexplained: ${n.audioClockPpm.toFixed(0)} ppm. That is this node's audio`);
+    lines.push(`clock against its own performance.now() - a pair nothing else here measures.`);
+  } else if (n.runS !== null && n.runS !== undefined) {
+    lines.push(`source started ${n.runS.toFixed(0)} s ago. The rate trim resets to 1.0 on`);
+    lines.push(`every start and needs ~45 s to settle, so there is no attribution yet.`);
+  }
+  const odd = n.audioClockPpm !== null && n.audioClockPpm !== undefined
+              && Math.abs(n.audioClockPpm) > 150;
+  return `<td class="num${odd ? " errOdd" : ""}"${
+    lines.length ? ` title="${esc(lines.join("\n"))}"` : ""}>${err}</td>`;
+}
+
 function renderNodeTable() {
   const rows = snap.nodes.map((n) => {
     // Decode outranks download: loadPct sits at 100 for the whole decode, so
@@ -187,15 +228,13 @@ function renderNodeTable() {
                 : dl ? `⬇ ${n.loadPct}%`
                 : (n.loadedCurrent ? "ready" : (n.connected ? "idle" : "gone"));
     const err = n.playing ? fmt(n.syncErrMs, 1) : "—";
-    const ratePpm = (n.ratePpm === null || n.ratePpm === undefined)
-      ? "" : ` title="servo rate: ${n.ratePpm >= 0 ? "+" : ""}${n.ratePpm.toFixed(0)} ppm"`;
     return `<tr data-node="${esc(n.id)}">
       <td><span class="dot ${n.connected ? "ok" : ""}"></span>${esc(n.name)}</td>
       <td class="num">${fmt(n.offsetMs, 2)}</td>
       ${trustCellFor(n)}
       <td class="num">${fmt(n.bestRttMs, 1)}</td>
       ${skewCellFor(n)}
-      <td class="num"${ratePpm}>${err}</td>
+      ${errCellFor(n, err)}
       ${posCellFor(n)}
       <td class="num hideSm">${n.nUsed}/${n.nSamples}${
         n.pingBoost > 1.05

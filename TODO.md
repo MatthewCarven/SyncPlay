@@ -270,6 +270,49 @@ the player audio path only when unavoidable, one commit per feature so
     `outputLatency`/`baseLatency`/sample-rate readout and the err-ms sparkline
     already listed under "More timing info" — both would have shown this.
 
+- [ ] **`onSteer` can dereference a nulled `current` and kill a node silently**
+      (found 2026-08-27; needs `player.js`, so a fleet reload and its own commit)
+  - The re-anchor branch calls `startSource`, which calls `stopCurrent()` (which
+    sets `current = null`) and *then* early-returns on
+    `if (seekS >= buf.duration) return`. Control falls through to player.js:489,
+    `rate: current.rate` — TypeError on null.
+  - Cost: the node is silent, `onended` was already detached so no `state` is
+    sent, and the conductor keeps steering a node that is not playing for the
+    rest of the track. Exactly the failure shape as the two fixed in `b5de5b0`.
+  - Reachable **at end-of-track**, where `+ (nowCtx + 0.08 - targetCtx)` makes
+    the seek largest — and `_steer_all` only declines the last 400 ms, so the
+    window is open. Also reachable on a short or truncated decode.
+  - Fix is small (bail before `stopCurrent`, or ack defensively), but the real
+    value is giving it a voice rather than a silent return.
+  - **This is the first thing to check** if `err ms` ever renders stale: a dead
+    ack stream is exactly what this bug looks like from the conductor.
+
+- [ ] **Follow-ups to the err-reading slice** (2026-08-27, all optional)
+  - **A trace that outlives the process.** The shipped fields answer "what is it
+    doing now"; they cannot answer "is this the same thing we saw in July",
+    which is the question actually being asked. A ~10-line JSONL sidecar per
+    steerAck would make a reading taken next month comparable rather than a
+    fourth anecdote. An in-memory ring dies with the conductor and covers
+    minutes; the file is the part with real reach.
+  - **A sparkline** over the last few minutes, to tell settled from stepping
+    from sawtooth. Note it does **not** discriminate on its own: an audio-clock
+    ramp and an estimator-slope ramp produce bit-identical droop, and only the
+    `audioClockPpm` split separates them. Also record `est.skew_ppm` per sample
+    if this lands — subtracting the *instantaneous* slope from an `err` that
+    integrated the slope's *history* through a 15 s lag is only safe on a node
+    whose fit is steady, and the tablet is precisely not that node.
+  - **An integral term** is the actual fix for standing droop, and is a design
+    decision rather than a bug fix: it would drive `err` to zero and park the
+    trim at the disturbance. It also **destroys the measurement** — droop is the
+    only reason `err ms` carries eps at all — so if it is ever added, the
+    attribution has to move onto the trim itself first. Touches the audio path.
+    Not before the route question below is settled.
+  - **The route question, which is Matthew's to answer and worth more than any
+    of the above:** is the tablet playing through its internal speaker, or over
+    Bluetooth / USB / HDMI? On an external wireless route 380 ppm is ordinary
+    and the case is closed; on the internal speaker it is a 4-20x outlier and
+    something else is going on.
+
 - [ ] **Spread the join burst across more than one radio window** (partly
       mitigated by the armed cold start; still open for mid-song joins)
   - `BURST_JOIN = (16, 0.06)` puts every join sample inside a single ~1 s

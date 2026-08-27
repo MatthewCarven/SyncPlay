@@ -98,6 +98,9 @@
   td.trustGood { color: var(--accent); }
   td.trustFair { color: var(--warn); }
   td.trustPoor { color: var(--bad); }
+  /* A reading that has expired, and one whose disturbance has no owner. */
+  td.errStale { color: var(--dim); font-style: italic; }
+  td.errOdd { color: var(--warn); }
   button.forget {
     font: inherit; font-size: .7rem; line-height: 1; padding: 1px 4px;
     color: var(--dim); background: none; border: 1px solid var(--edge);

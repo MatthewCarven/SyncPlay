@@ -1423,3 +1423,124 @@ Where it does bite is `filter_best`: `cutoff = best + 0.002 + 0.25 x best`
 scales the gate off `best`, i.e. off the component that contains no asymmetry at
 all. The re-tune item now has that argument written into it. Nothing was
 changed — this is all reading, and the ± column should keep its certificate.
+
+## 2026-08-27 (cont.) — `err ms` is not a fault report, it is a measurement
+
+Continuing the tablet. A ten-agent pass (four mappers, four adversarial lenses,
+a designer and a completeness critic) was pointed at one hypothesis, and the
+notable result is that **0 of 4 lenses refuted it — including the one whose only
+instruction was to refute it.**
+
+**The law.** The servo is proportional-only: `rate = 1 - errS/STEER_HORIZON_S`
+is an assignment from the instantaneous error, and `current.rate` is written in
+exactly two places in `player.js` (line 441, `rate: 1` at source start, and line
+484). No accumulator exists anywhere. The re-anchor `anchorPos = posAt(nowCtx)`
+looks like integration and is not — it carries the *plant's* state across a rate
+change, losslessly, and never sees `errS`. So the integrator is the plant, the
+controller is proportional, and the loop is type 1: zero steady-state error to a
+step, standing error to a ramp.
+
+    de/dt = (rate - 1) + eps = -e/H + eps   =>   e_settled = H * eps
+
+With H = 15 s, a settled 6.0 ms error means eps = 400 ppm, every time. One lens
+verified this by transcribing `posAt`/`anchorPos`/`anchorCtx` line-for-line and
+simulating: a 6 ms *step* decays to 0.0003 ms in 200 s, a 400 ppm *ramp* settles
+at 5.9976 ms and stays. Cadence-invariant at dt = 1, 2 and 4 s, because dt
+cancels. That is the whole reason +6.5 (July, 1.0x cadence) and +6.0 (August,
+4.0x) are consistent readings rather than a coincidence.
+
+**Two things I had wrong, both now dead.**
+
+- *"Coarsely-quantised getOutputTimestamp"* (previous entry) is refuted outright.
+  Both fields of the pair are written from the same audio callback, so the pair
+  is self-consistent and staleness costs staleness*eps — 40 microseconds at
+  400 ppm. Quantisation of a correlated pair cannot produce 6 ms. Only the
+  *fallback* branch quantises harmfully, and its sawtooth would be tens of ms
+  and would trip `REANCHOR_S` constantly, which is not observed.
+- *"HAL resampling at a rounded ratio"* is wrong by roughly four orders of
+  magnitude: AudioFlinger-class resamplers carry a 32-bit phase increment, so
+  ratio quantisation is ~0.01 ppm, not hundreds.
+
+**The estimator is exonerated, three independent ways.** This matters because it
+is the one hypothesis that would have made the fix server-side.
+
+1. *Arithmetic.* eps = eps_C + fitted_skew. The tablet's fitted slope is
+   20.1 ppm, so it supplies 0.30 ms of the 6.0.
+2. *The code's own ceiling.* The largest slope that measurement error can fake
+   is `skew_bound = worst_rtt/span`, and `min_slope_span = 30 s` is a hard
+   floor — so estimator-driven droop cannot exceed
+   `H*rtt/span = 15*6.04ms/30s = 3.02 ms`, which is *identically this node's own
+   trust bound*. Observed 6.0 ms is 1.99x that ceiling. A pleasing result: the
+   ± column turns out to bound the servo too, not just the offset.
+3. *Simulation.* Fed the real `ClockModel` an adversarial stream (5.4% survival,
+   sparse awake windows, per-episode asymmetry flips, `filter_best` cutoff moved
+   to mass-evict clusters): worst single refit jump 8.94 ms, worst projection
+   error 10.66 ms, and yet mean err held +0.287 ms with 0 of 7008 samples past
+   +5.5 ms across 12 seeds. Refit steps are the derivative of a bounded signal
+   and are zero-mean; they cannot hold a mean.
+
+Also established: a *constant* offset-estimate error is entirely invisible to
+`err`. Errors of 0 / 3 / 6 / 50 / 200 ms all give identical steady err, because
+the projection's lever arm cancels in d/dt. A big projection error is absorbed
+as silent acoustic misplacement — never reported. Worth remembering.
+
+**So eps_C is about 380 ppm**, and that is the node's AudioContext clock against
+its own `performance.now()` — a pair of oscillators *nothing in this system has
+ever measured*. Every ping timestamp and every mesh timestamp is
+`performance.now()` at both ends (player.js:876, 894), so all of it is CPU-vs-CPU
+and none of it constrains this. The mesh's 20.1 ppm places no bound on it at all.
+
+**The magnitude is still the weak point, honestly.** 380 ppm is 18 Hz on a
+nominal 48 kHz, 4-20x outside the spec class consumer audio crystals are built
+to. The credible routes are (a) a platform defect — contextTime derived from a
+frame counter divided by the *nominal* rate while the device consumes frames at
+a materially different one, or a deep-buffer/offload path (selected by
+`latencyHint: "playback"`, player.js:79) reporting from another clock domain; or
+(b) **the tablet is not on its internal speaker.** On Bluetooth A2DP, USB or
+HDMI, 380 ppm is unremarkable and would be the expected answer. Nobody has
+established which, and it is the single most informative unknown left.
+
+**And one hypothesis that has to be excluded before any of that, because it is
+free.** `sync_err_ms` had no expiry: it is only overwritten by a fresh ack or
+cleared on stop, so a node whose ack stream dies mid-song displays its last
+reading forever. A frozen number and a settled one are indistinguishable, and
+the tablet is the node most likely to freeze. **If the ack stream had died, both
+observations are void.** That is what this commit makes visible.
+
+**Shipped: `errAgeS` / `errStale` / `runS` / `audioClockPpm`.** Conductor and
+control page only — **no fleet reload.** The attribution is
+`-(rate - 1)*1e6 - skewPpm`, and note it needs no mirror of `STEER_HORIZON_S`:
+the standing rate trim *is* the disturbance, so the horizon never enters. It
+refuses to answer unless the reading is fresh *and* the run has been going
+`ERR_SETTLE_S` (45 s, three time constants) — every source start resets the trim
+to 1.0, and a reading taken mid-climb is a transient wearing a measurement's
+clothes.
+
+The run boundary is the critic's catch and the subtlest thing here: it is bumped
+on **any non-null `state` message, not on a track change**. `player.js` sends
+`state` from exactly one place (`startSource`), so non-null means "a source just
+started at rate 1.0" — and a re-anchor restart, a seek and a mid-song catch-up
+all do that under an *unchanged* trackId. Keying the boundary to the trackId
+would have missed all three and averaged a fresh 45 s climb into the settled
+figure, contaminating precisely the measurement this exists to make.
+
+263 tests (15 new in `test_err_reading.py`). The control-page half was checked by
+running the shipped `errCellFor` out of `control.js` under node against five
+synthetic snapshots (settled / stale / mid-climb / healthy / stopped).
+
+**A real bug found in passing, not fixed here.** `onSteer`'s re-anchor branch
+calls `startSource`, which calls `stopCurrent()` (nulling `current`) and *then*
+bails on `if (seekS >= buf.duration) return`. Control falls back to
+player.js:489, `rate: current.rate`, on null — TypeError. The node goes silent,
+`onended` was already detached so no `state` is sent, and the conductor goes on
+steering a corpse for the rest of the track. Reachable exactly at end-of-track,
+where the seek adjustment makes it likeliest. Same family as the two silent
+failures fixed in b5de5b0. It needs `player.js`, so it needs a fleet reload and
+its own commit.
+
+**Corrections to the record:** the steer loop is **0.5 Hz**, not 1 Hz —
+`_steer_all()` is gated behind `if tick % 2 == 0` (conductor.py:741); only
+`push_state` runs at 1 Hz. And there is a third `err` observation nobody has
+explained: **-3.8 ms** on 2026-07-28 (WORKLOG:448), a sign flip a constant eps_C
+cannot produce — though it was taken right after a join, in a regime three
+subsequent changes have since altered.

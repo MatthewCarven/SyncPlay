@@ -82,6 +82,21 @@ BURST_JOIN = (16, 0.06)     # right after a node connects: converge fast
 BURST_GAP = (10, 0.07)      # song gaps, idle, and manual resync
 BURST_PLAYING = (3, 0.10)   # sparse keepalive during playback
 INTERVAL_PLAYING = 5.0
+
+# --- reading `err ms` honestly ------------------------------------------------
+# The servo is proportional-only: player.js sets rate = 1 - errS/STEER_HORIZON_S
+# from the *instantaneous* error, with no integral term anywhere. A loop like
+# that has zero steady-state error against a step but a standing one against a
+# constant-rate disturbance, so a settled `err ms` is not a fault report — it is
+# 15 s x whatever rate the node's playback is slipping at. The standing rate
+# trim the node reports back *is* that disturbance, which is what makes the two
+# fields below worth computing rather than merely displaying.
+ERR_STALE_S = 6.0     # 3x the 2 s steer cadence; past this `err ms` is a memory
+# Three servo time constants. Every source start resets the trim to 1.0 (see
+# startSource in player.js), so the standing value takes this long to re-emerge
+# and any attribution made before then is reading a transient.
+ERR_SETTLE_S = 45.0
+ERR_CLAMP_MS = 60_000.0  # client data; a whole minute of error is already absurd
 INTERVAL_IDLE = 2.0
 INTERVAL_BURSTING = 1.0
 
@@ -123,6 +138,19 @@ def _clean_pct(v) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return None if not math.isfinite(p) else max(0.0, min(100.0, p))
+
+
+def _clean_err_ms(v) -> Optional[float]:
+    """A servo error off the wire. Clamped rather than dropped: the samples
+    worth keeping most are the outrageous ones (a REANCHOR restart reports the
+    error that caused it), so a bound is right but a filter is not."""
+    try:
+        e = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(e):
+        return None
+    return max(-ERR_CLAMP_MS, min(ERR_CLAMP_MS, e))
 
 
 def _clean_skew(v) -> Optional[float]:
@@ -403,6 +431,18 @@ class Node:
         self.playing_track: Optional[str] = None  # as reported by the node
         self.sync_err_ms: Optional[float] = None  # last steer error it reported
         self.play_rate: Optional[float] = None  # its current servo playback rate
+        # When the last steerAck actually landed. Without this, `err ms` has no
+        # expiry: sync_err_ms is only ever overwritten or cleared on stop, so a
+        # node whose ack stream dies mid-song goes on displaying its final
+        # reading forever, and a frozen number is indistinguishable from a
+        # beautifully steady one.
+        self.err_seen_at: Optional[float] = None
+        # When this node's current audio source started, i.e. when its rate trim
+        # was last reset to 1.0. Bumped on *any* non-null state report, not just
+        # a track change: a re-anchor restart, a seek and a mid-song catch-up all
+        # start a fresh source under the same trackId, and all three reset the
+        # servo. Anything read before ERR_SETTLE_S of this is a transient.
+        self.run_since: Optional[float] = None
         self.burst_until = 0.0
         self.ping_boost = 1.0  # live cadence multiplier, for the control page
         self.kick = asyncio.Event()
@@ -421,6 +461,8 @@ class Node:
         self.playing_track = None
         self.sync_err_ms = None
         self.play_rate = None
+        self.err_seen_at = None
+        self.run_since = None
         self.burst_until = 0.0
         self.mic = False  # mic mode is per page-life; the client re-announces it
 
@@ -472,6 +514,36 @@ class Node:
                 await self.ws.send_str(json.dumps(payload))
             except (ConnectionError, RuntimeError):
                 pass  # the receive loop will notice and clean up
+
+    def _audio_clock_ppm(self, est) -> Optional[float]:
+        """This node's AudioContext clock against its own performance.now(), ppm.
+
+        Derived, not measured — but derived from an identity rather than a model.
+        The servo has no integral term, so once settled its standing rate trim
+        exactly balances whatever is making playback slip:
+
+            rate - 1 = -err / STEER_HORIZON_S   =>   disturbance = -(rate - 1)
+
+        The conductor supplies part of that disturbance itself. `atNodeMs` is
+        built from `to_node_time`, which advances at `1 + skew` per conductor
+        second, so the fitted slope is inside the loop by construction and the
+        node dutifully trims against it. Subtracting it leaves the one term
+        neither end accounts for: the node's audio clock against its own CPU
+        clock. Note the node's *true* drift never appears here — only the slope
+        the conductor asserted — which is why this reads the same whether that
+        fit is right or wrong.
+
+        Refuses to answer rather than guess. Every source start resets the trim
+        to 1.0, so a reading taken during the climb is a transient wearing a
+        measurement's clothes; and a stale ack is not a reading at all.
+        """
+        if self.play_rate is None or est is None or self.playing_track is None:
+            return None
+        if self.err_seen_at is None or now() - self.err_seen_at > ERR_STALE_S:
+            return None
+        if self.run_since is None or now() - self.run_since < ERR_SETTLE_S:
+            return None
+        return -(self.play_rate - 1.0) * 1e6 - est.skew_ppm
 
     def stats(self, current_track: Optional[str]) -> dict:
         est = self.model.estimate()
@@ -534,6 +606,33 @@ class Node:
             "nSamples": len(self.model),
             "spanS": 0.0,
             "pingBoost": self.ping_boost,
+            # How old `err ms` is, and whether it has expired. A steerAck stream
+            # can stop without the node saying so; until this existed there was
+            # no way to tell a settled servo from a dead one.
+            "errAgeS": (
+                None if self.err_seen_at is None else now() - self.err_seen_at
+            ),
+            "errStale": (
+                self.err_seen_at is not None
+                and now() - self.err_seen_at > ERR_STALE_S
+            ),
+            "runS": (None if self.run_since is None else now() - self.run_since),
+            # The disturbance the servo is holding off, split into the part the
+            # conductor already explains and the part it cannot.
+            #
+            # At steady state the standing rate trim IS the disturbance:
+            # rate - 1 = -err/H, so -(rate - 1) is the rate at which this node's
+            # playback would slip if the servo let go. Of that, `skewPpm` is the
+            # conductor's own fitted node-clock slope, which enters the steer
+            # target by construction and is therefore *expected*. What is left
+            # over is the node's AudioContext clock running against its own
+            # performance.now() — a pair of oscillators nothing else in this
+            # system measures (every ping and every mesh timestamp is
+            # performance.now() at both ends, so they are all CPU-vs-CPU).
+            #
+            # None until the reading is both fresh and settled, because a rate
+            # trim mid-climb is a transient and attributing it would be fiction.
+            "audioClockPpm": self._audio_clock_ppm(est),
         }
         if est is not None:
             d.update(
@@ -1632,8 +1731,11 @@ class Conductor:
                 except (KeyError, ValueError, TypeError):
                     pass
         elif kind == "steerAck":
+            err = _clean_err_ms(data.get("errMs"))
+            if err is not None:
+                node.sync_err_ms = err
+                node.err_seen_at = now()
             try:
-                node.sync_err_ms = float(data["errMs"])
                 node.play_rate = float(data["rate"])
             except (KeyError, ValueError, TypeError):
                 pass
@@ -1642,6 +1744,15 @@ class Conductor:
             if node.playing_track is None:
                 node.sync_err_ms = None
                 node.play_rate = None
+                node.err_seen_at = None
+                node.run_since = None
+            else:
+                # Every non-null report means a source just started at rate 1.0.
+                # player.js sends this from exactly one place (startSource), so
+                # "non-null state" is precisely "the servo was just reset" —
+                # which a trackId comparison would miss, because a re-anchor
+                # restart, a seek and a catch-up all reuse the same trackId.
+                node.run_since = now()
         elif kind == "spectrum":
             # Cosmetic per-node level meter, relayed straight to any open control
             # page — never stored, never touches timing. Clamp hard: client data.
