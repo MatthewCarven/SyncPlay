@@ -1544,3 +1544,58 @@ its own commit.
 explained: **-3.8 ms** on 2026-07-28 (WORKLOG:448), a sign flip a constant eps_C
 cannot produce — though it was taken right after a join, in a regime three
 subsequent changes have since altered.
+
+## 2026-08-27 (cont.) — closing the `err` thread: the droop is real and it does not matter
+
+Matthew's call, and it is the right one: the tablet is an older device, slower
+than anything the fleet will really be built around, so its results are parked
+rather than chased. He asked whether a newer one needs borrowing to settle this.
+It does not, and the arithmetic is the reason.
+
+**What the droop costs on the fleet that matters.** Taking the three remaining
+nodes at `err/H` (single snapshots, so provisional — the shipped tooltip refuses
+to attribute anything before 45 s of settling, and these predate it):
+
+    ID10TError-Laptop1   err  -0.0 ms  ->    -0 ppm
+    ID10TError-pc        err  +0.5 ms  ->   +33 ppm
+    Id10terror phone     err  -1.0 ms  ->   -67 ppm
+
+    worst pair spread : 1.5 ms  =  0.51 m of air
+
+Half a metre. Speakers do not get placed in a room to that accuracy, and
+`plan_nudges` exists precisely to measure where they actually ended up. So the
+standing droop on ordinary crystals sits **below the noise floor of the physical
+layout**, and the integral term — which would cost an audio-path change and a
+fleet reload — buys back less than one knock of a speaker stand. Not worth it.
+Filed as considered-and-declined rather than pending, with the numbers, so it is
+not re-derived in three months.
+
+Note the ordering worry from the previous entry turned out to be a non-issue
+anyway: an integral term would *not* have destroyed the measurement, because
+`audioClockPpm` reads the standing trim rather than `err`, and with integral
+action the trim still parks at the disturbance while `err` goes to zero. The
+slice shipped this morning was already the prerequisite. Good to know if the
+question ever comes back on a fleet where the spread is bigger.
+
+**And no new hardware is needed to answer the Android question**, because it is
+already answered by a device in the room: the *phone* is Android too, and reads
+-67 ppm — an entirely ordinary crystal. Two Android devices, one ordinary and
+one bad specimen. A third would confirm the tablet is unusual, which is not in
+doubt. The genuinely open version of that question — do arbitrary guest phones
+hold sync at a party — belongs to party mode, which does not exist yet.
+
+**What stays available at zero cost:** the 60-second `chrome://inspect` console
+measurement on the *existing* tablet (see TODO). It needs no new device and no
+reload, and it is the only thing that would say what 380 ppm actually is. Left
+as curiosity, not as a blocker.
+
+**What this thread produced, for the record.** Two shipped commits (the mesh RTT
+decomposition, and `err ms` gaining an expiry date and an attribution), one real
+crash bug found and logged for the next reload, a sharper argument written into
+the `filter_best` re-tune item, and three of my own hypotheses killed — coarse
+`getOutputTimestamp` quantisation, HAL resampler ratio error, and the estimator
+itself. The estimator's exoneration is the one worth remembering: the code's own
+`min_slope_span` floor caps estimator-driven droop at `H*rtt/span` = 3.02 ms,
+which is *identically* the node's own ± bound. The trust column turns out to
+bound the servo as well as the offset, which nobody designed and which is now
+the cheapest way to tell a servo problem from an estimator one.

@@ -270,8 +270,14 @@ the player audio path only when unavoidable, one commit per feature so
     `outputLatency`/`baseLatency`/sample-rate readout and the err-ms sparkline
     already listed under "More timing info" — both would have shown this.
 
-- [ ] **For meatthread0: measure the tablet's audio clock directly** (60 seconds,
-      no code change, no fleet reload — and it settles the whole question)
+- [ ] **For meatthread0 (curiosity, not a blocker): measure the tablet's audio
+      clock** (60 seconds, no code change, no fleet reload, no new hardware)
+  - **Thread parked 2026-08-27.** The tablet is an older device and slower than
+    what the fleet will be built around, so its 380 ppm is logged as an outlier
+    rather than chased. No newer device needs borrowing to settle anything: the
+    *phone* is Android too and reads an entirely ordinary -67 ppm, so "is Android
+    broken" is already answered by hardware in the room. The open version of that
+    question — do arbitrary guest phones hold sync — belongs to party mode.
   - **Route confirmed 2026-08-27: internal speaker.** That is the answer that
     makes this worth measuring. On Bluetooth/USB/HDMI a ~380 ppm audio clock is
     ordinary and there would be nothing to chase; on the internal speaker it is
@@ -352,12 +358,18 @@ the player audio path only when unavoidable, one commit per feature so
     if this lands — subtracting the *instantaneous* slope from an `err` that
     integrated the slope's *history* through a 15 s lag is only safe on a node
     whose fit is steady, and the tablet is precisely not that node.
-  - **An integral term** is the actual fix for standing droop, and is a design
-    decision rather than a bug fix: it would drive `err` to zero and park the
-    trim at the disturbance. It also **destroys the measurement** — droop is the
-    only reason `err ms` carries eps at all — so if it is ever added, the
-    attribution has to move onto the trim itself first. Touches the audio path.
-    Not before the route question below is settled.
+  - ~~**An integral term**~~ — **declined 2026-08-27, with numbers.** It is the
+    real fix for standing droop, but on the fleet that matters the droop spans
+    1.5 ms across laptop/pc/phone = **0.51 m of air**, which is finer than
+    speakers get placed and is what `plan_nudges` measures anyway. An audio-path
+    change plus a fleet reload to recover less than one knock of a speaker
+    stand. Revisit only if a fleet ever shows a *spread* (not an outlier) worth
+    more than the placement error.
+    - Worth recording: the feared ordering problem was imaginary. It would
+      **not** destroy the measurement, because `audioClockPpm` reads the
+      standing trim rather than `err` — with integral action the trim still
+      parks at the disturbance while `err` goes to zero. The slice shipped
+      2026-08-27 was already the prerequisite.
   - ~~**The route question**~~ — **answered 2026-08-27: internal speaker.** So
     380 ppm is not an ordinary external-sink free-run; it is a 4-20x outlier and
     wants measuring rather than theorising about. See the meatthread0 item above.
