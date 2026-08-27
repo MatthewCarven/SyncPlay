@@ -270,6 +270,43 @@ the player audio path only when unavoidable, one commit per feature so
     `outputLatency`/`baseLatency`/sample-rate readout and the err-ms sparkline
     already listed under "More timing info" — both would have shown this.
 
+- [ ] **The laptop<->phone mesh pair is missing on the hotspot setup**
+      (noticed 2026-08-27; may be a finding rather than a gap)
+  - Fleet was laptop + phone + "Mums tablet", with the **phone acting as the
+    access point** and both others as its clients. The mesh table showed only
+    `tablet<->laptop` and `tablet<->phone`. The third pair never appeared.
+  - Benign reading: it simply had not accumulated samples yet (the other two
+    were on n=22 and n=7, so nothing was well-sampled).
+  - The reading worth checking: a hotspot can enforce **AP isolation**, or put
+    clients where ICE cannot build a direct DataChannel. If those two cannot
+    reach each other peer-to-peer at a desk, they will not at a party — and the
+    mesh silently degrades to "no row" rather than saying so. A pair that never
+    forms should probably be distinguishable from one that has no samples yet.
+  - It is also the constraint that would make endpoint mapping *testable*: with
+    it, 5 equations over 4 unknowns leaves a residual to check. Without it the
+    solve is exactly determined and proves nothing.
+
+- [ ] **Endpoint-cost mapping is a real instrument now — write it down before
+      it is re-derived** (2026-08-27)
+  - Every pair's RTT is the sum of what each end costs, so a few pairs
+    over-determine per-node figures. Two independent fits so far:
+    - router network: laptop 0.87, pc 1.16, phone 2.34, tablet 2.33 ms one-way
+    - phone-as-hotspot: laptop 0.85, phone 1.45, tablet 3.75 ms one-way
+    The **laptop reproduces at 0.87 vs 0.85 across completely different
+    topologies**, which is the result that says the model is measuring the
+    device rather than the network.
+  - The WebRTC DataChannel costs ~0.8-1.3 ms over the WebSocket on the same
+    pair, so the mesh `rtt ms` column and the `best rtt` column are **not
+    directly comparable**. Worth a tooltip.
+  - `rtt ms` is a *minimum*: a min over ~20 draws sits 2-3 ms above a min over
+    ~115. Never compare pairs at different `n` without saying so.
+  - Prediction not yet tested: with a phone as AP, reaching *the phone* costs
+    its whole browser stack while reaching *through* it is a kernel forward — so
+    per air-hop, transiting the AP should be cheaper than terminating at it.
+  - Limit, already settled under Considered and dropped: this maps **topology,
+    not geometry**. Propagation over 10 m is 33 ns; what rises with distance is
+    retransmissions.
+
 - [ ] **For meatthread0 (curiosity, not a blocker): measure the tablet's audio
       clock** (60 seconds, no code change, no fleet reload, no new hardware)
   - **Thread parked 2026-08-27.** The tablet is an older device and slower than
