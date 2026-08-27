@@ -1376,3 +1376,50 @@ logged, not reasoned about.
 
 Nothing was changed on the fleet and no code was touched. The TODO item has been
 rewritten to say what it now knows.
+
+## 2026-08-27 (cont.) — what the mesh RTTs are actually made of
+
+Matthew's read of the mesh table: phone<->tablet is the worst pair because both
+are wireless ARM devices, so a round trip is device -> AP -> device -> AP ->
+device, and neither has spare threads for interrupts — where the laptop is also
+wireless but has 16.
+
+The additive shape is right and the table has enough constraints to check it:
+six pairs over four nodes. Three corrections came out of doing so.
+
+**The DataChannel is not free, and it is separable without any fitting.** Same
+pair, two transports: laptop<->pc reads 2.65 ms on the mesh vs 1.90 ms on the
+conductor WebSocket; laptop<->phone reads 3.95 vs 3.10. Two independent pairs
+agreeing to 0.1 ms, so ~0.8 ms of every mesh cell is SCTP/DTLS on the two ends.
+The mesh `rtt ms` column and the `best rtt` column beside it are therefore *not*
+directly comparable, which is worth a tooltip at some point.
+
+**The ARM penalty is real but small.** Fitting one-way endpoint costs against
+only the well-sampled constraints (n_used >= 65) gives laptop 0.87, pc 1.16,
+phone 2.34, tablet 2.33 ms. The two ARM devices land on the *same* number and
+sit ~1.4 ms above the laptop — not the 3x the raw table suggests. (The tablet's
+term is pinned by a single constraint and is the weakest of the four.)
+
+**Most of the "massive" 7.9 ms is small-n, not physics.** `rtt ms` is
+`best_rtt`, a *minimum*, and the tablet's mesh pairs carry n_used 14-26 against
+laptop<->pc's 115. A minimum over 20 draws sits well above a minimum over 115.
+Against the fitted floors: pc<->tablet +0.86, laptop<->tablet +2.05,
+phone<->tablet +3.23. That last pair has the fewest samples *and* the two
+slowest nodes, so it eats both. Its 6.9 -> 8.9 swing between the two snapshots
+is the same effect; laptop<->pc moved 2.6 -> 2.7.
+
+**The part that matters for timing.** Asymmetry decomposes as
+`(A_tx - A_rx) - (B_tx - B_rx)` — a node's total endpoint cost *cancels*, and
+only its tx-vs-rx imbalance reaches the offset. Slow-CPU cost is roughly
+symmetric and buys no offset error. Wi-Fi power-save is receive-side only (the
+AP buffers downlink to the next beacon) and is pure asymmetry. Those separate
+along exactly the line the ± column already draws: `best_rtt` is a minimum so it
+catches the awake windows and is dominated by the symmetric floor, while
+`worst_rtt` catches the parked ones and is dominated by the asymmetric tail.
+`trust_s` uses `worst_rtt`. It was aimed at the right quantity, and now has a
+mechanical reason rather than only the bounding argument.
+
+Where it does bite is `filter_best`: `cutoff = best + 0.002 + 0.25 x best`
+scales the gate off `best`, i.e. off the component that contains no asymmetry at
+all. The re-tune item now has that argument written into it. Nothing was
+changed — this is all reading, and the ± column should keep its certificate.

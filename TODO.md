@@ -297,6 +297,25 @@ the player audio path only when unavoidable, one commit per feature so
     changes behaviour for *every* node, not just returning ones. Sim coverage
     in `test_timesync.py` should show it helps a jittery node without
     starving a quiet one of samples.
+  - **2026-08-27, the argument this item was missing.** Asymmetry decomposes as
+    `(A_tx - A_rx) - (B_tx - B_rx)`: a node's *total* endpoint cost cancels, and
+    only its transmit-vs-receive **imbalance** reaches the offset. Slow-CPU cost
+    is roughly symmetric and buys no offset error; Wi-Fi power-save is
+    receive-side only (the AP buffers downlink to the next beacon) and is pure
+    asymmetry. `best_rtt` is a minimum, so it catches the *awake* windows and is
+    dominated by the symmetric floor — which means `0.25 x best` scales the gate
+    off precisely the component that contains **no asymmetry at all**, and hands
+    the widest gate to the node whose `best` is least informative about the
+    quantity being bounded. An absolute term is defensible; a relative one keyed
+    to `best` is not, and that is a sharper case than "slow nodes get a wider
+    gate". Mesh-derived one-way endpoint costs (2026-08-27): laptop 0.87, pc
+    1.16, phone 2.34, tablet 2.33 ms.
+  - **`worst_rtt` is unaffected by the above and stays correct** — it catches the
+    *parked* windows, so it is dominated by the power-save tail, which is the
+    asymmetric part. The ± column is aimed at the right quantity; do not "tighten"
+    it with a symmetry model. Its whole value is being a certificate rather than
+    an estimate, and trading that for an assumption about ARM stacks would be a
+    bad swap at any width.
   - **It now has a scoreboard.** The ± column is a direct readout of what this
     tolerance costs: a wider gate admits a wider worst survivor and the bound
     grows, while the floor (`best_rtt/2`) holds still. Bench measurement of the
