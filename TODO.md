@@ -270,6 +270,57 @@ the player audio path only when unavoidable, one commit per feature so
     `outputLatency`/`baseLatency`/sample-rate readout and the err-ms sparkline
     already listed under "More timing info" — both would have shown this.
 
+- [ ] **For meatthread0: measure the tablet's audio clock directly** (60 seconds,
+      no code change, no fleet reload — and it settles the whole question)
+  - **Route confirmed 2026-08-27: internal speaker.** That is the answer that
+    makes this worth measuring. On Bluetooth/USB/HDMI a ~380 ppm audio clock is
+    ordinary and there would be nothing to chase; on the internal speaker it is
+    4-20x outside the class consumer audio crystals are built to, so either the
+    P-droop reading is wrong or the platform is reporting a bad number. No
+    simple units slip lands there either (2048/2047 = 489 ppm, 4096/4095 = 244),
+    so it is not an off-by-one in a divisor.
+  - **How.** Tablet joined and *playing* (a suspended context freezes
+    `currentTime` and the measurement reads zero). On the conductor box open
+    `chrome://inspect`, inspect the tablet's SyncPlay page, and paste this into
+    its console. `player.js` is a classic script, so `ctx` is in scope.
+
+        (async () => {
+          const t = () => { const o = ctx.getOutputTimestamp();
+            return {c:o.contextTime, p:o.performanceTime,
+                    cur:ctx.currentTime, now:performance.now()}; };
+          console.log("sampleRate", ctx.sampleRate, "outputLatency", ctx.outputLatency,
+                      "baseLatency", ctx.baseLatency, "state", ctx.state);
+          const a = t();
+          console.log("pair usable:", a.c > 0 && a.p > 0, a);
+          await new Promise(r => setTimeout(r, 60000));
+          const b = t();
+          const span = (b.p - a.p) / 1000;
+          const dC = (b.c - a.c) - span;
+          console.log("span", span.toFixed(1), "s");
+          console.log("audio vs CPU:", (dC / span * 1e6).toFixed(1), "ppm   <-- the number");
+          const span2 = (b.now - a.now) / 1000;
+          console.log("cross-check via currentTime:",
+                      (((b.cur - a.cur) - span2) / span2 * 1e6).toFixed(1), "ppm");
+        })();
+
+  - **Reading it.** The two figures should agree — in Chrome `currentTime` is
+    also a frame counter, so they share the same drift and disagreement means
+    the pair is unusable rather than that one is wrong.
+    - **~+380 ppm** — the servo has been telling the truth all along, `err ms`
+      is a measurement, and the tablet's audio clock is genuinely that far out.
+      Then the question becomes whether to add an integral term (see above), and
+      `ctx.sampleRate` vs the device's real rate says whether it is a units bug.
+    - **~0 ppm** — P-droop is dead despite surviving four adversarial lenses,
+      and the 6 ms is coming from somewhere none of them looked. Start again
+      from the `err ms` cell: if it renders *stale*, the ack stream had died and
+      every reading so far is void.
+    - **Anything else** — the number is the disturbance; compare against
+      `-(ratePpm) - skewPpm` in the tablet's err tooltip on the control page.
+      They are two independent routes to the same quantity and should match.
+  - While in there, note `ctx.sampleRate`, `ctx.outputLatency` and
+    `ctx.baseLatency` — the dashboard wishlist wants all three anyway, and they
+    say whether the deep-buffer/offload path is in play.
+
 - [ ] **`onSteer` can dereference a nulled `current` and kill a node silently**
       (found 2026-08-27; needs `player.js`, so a fleet reload and its own commit)
   - The re-anchor branch calls `startSource`, which calls `stopCurrent()` (which
@@ -307,11 +358,9 @@ the player audio path only when unavoidable, one commit per feature so
     only reason `err ms` carries eps at all — so if it is ever added, the
     attribution has to move onto the trim itself first. Touches the audio path.
     Not before the route question below is settled.
-  - **The route question, which is Matthew's to answer and worth more than any
-    of the above:** is the tablet playing through its internal speaker, or over
-    Bluetooth / USB / HDMI? On an external wireless route 380 ppm is ordinary
-    and the case is closed; on the internal speaker it is a 4-20x outlier and
-    something else is going on.
+  - ~~**The route question**~~ — **answered 2026-08-27: internal speaker.** So
+    380 ppm is not an ordinary external-sink free-run; it is a 4-20x outlier and
+    wants measuring rather than theorising about. See the meatthread0 item above.
 
 - [ ] **Spread the join burst across more than one radio window** (partly
       mitigated by the armed cold start; still open for mid-song joins)
