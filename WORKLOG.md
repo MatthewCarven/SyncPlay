@@ -1817,3 +1817,66 @@ conductor needs a restart to pick it up.
 indistinguishable again. And a track change put the pc at **err -28.81 ms** at
 `runS 19` — a large, real transient that the settling gate correctly refuses to
 attribute, which is the first time that guard has visibly earned its place.
+
+## 2026-08-27 (cont.) — the instrument validates against itself, and the tablet is characterised
+
+Matthew restarted the conductor, which put today's commits into the running
+process for the first time, and gave the fleet a clean 240 s window. Two
+independent calculations of the same physical quantity, and they agree:
+
+    node                 ext ppm   cond ppm   sd ppm   verdict
+    ID10TError-pc           +9        +9          6    CREDIBLE
+    ID10TError-Laptop1      +1        +0          3    not credible
+    Mums-Tablet             +3        +4         36    CREDIBLE
+    Id10terror-phone        +1        +2         40    CREDIBLE
+    Id10terror-tablet      -12       -22        337    not credible
+
+`ext` is computed outside the conductor from sampled `err` / STEER_HORIZON_S
+minus the fitted drift; `cond` is the shipped path — Welford accumulators over
+the servo's rate trim, minus the same drift. Different inputs, different code,
+same answers. The pc lands on +9/+9 exactly.
+
+**Every credibility verdict is correct, and for the right reasons.** The `sd`
+column separates the fleet by an order of magnitude — 3, 6, 36, 40, **337** —
+which is precisely the discrimination the whole thread lacked. The laptop is
+refused because its audio clock genuinely *is* zero and cannot clear its own
+noise (the same shape of answer `skew_credible_at` gives, and correct). The
+Android 6 tablet is refused because it swings.
+
+**The -500 ppm poison is confirmed gone**, on the first conductor start carrying
+the `_clean_skew` fix:
+
+    Mums-Tablet        remembered none      <- was -500.000 ppm
+    Id10terror-phone   remembered none      <- was -500.000 ppm
+    ID10TError-pc      remembered +21.9     live +21.7  (kept)
+    Id10terror-tablet  remembered +20.4     live +20.1  (kept)
+    ID10TError-Laptop1 remembered -0.0                  (kept)
+
+Both saturated entries refused on load, all four genuine crystals preserved, and
+the state file never edited by hand.
+
+**The Android 6 tablet, now characterised five independent ways.** Across
+separate captures it reads mean +0.38 / sd 5.08 / 66 crossings, mean -0.02 /
+sd 4.99 / 25 crossings, and mean +0.12 / sd 5.06 / 46 crossings — while the
+fleet around it holds 0.4-0.5 ms spread. **It averages to zero and swings
++/-10 ms.** Not parked at +6, not parked at anything. Three sessions of this
+thread rested on single samples of exactly that signal.
+
+**A refinement Matthew's last two observations forced.** A track change broke
+the fleet once and then held perfectly through the next one. So a track change
+is not inherently destructive — it is a *stress test that only a marginal model
+fails*. The failing case had Mums-Tablet freshly reconnected with ~25 usable
+samples and a drift fit thrashing +16 -> +2 ppm, and the old tablet frozen at
+142/1304 gaining two samples per thirty seconds. The passing case had every
+model converged and the fleet already at 0.40 ms.
+
+That points the fix somewhere better than "exclude samples taken during a
+transfer". The load gate asks whether a node has *loaded*; `_catchup` proceeds as
+soon as `estimate() is not None`. Neither asks whether the estimate is any
+**good**, though `n_used`, `span` and `trust_ms` are all sitting right there.
+The TODO already wants this for `_catchup` ("gating on estimate quality rather
+than existence") — the same gate belongs on a track change, and it addresses the
+actual failure rather than one of its causes.
+
+Fleet at the end: **0.46 ms spread = 0.16 m of air**, 10/10 mesh pairs, worst
+closure 1.62 ms (on the n=9 pair; the n=114 pair reads -0.04).
