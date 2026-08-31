@@ -97,6 +97,14 @@ ERR_STALE_S = 6.0     # 3x the 2 s steer cadence; past this `err ms` is a memory
 # and any attribution made before then is reading a transient.
 ERR_SETTLE_S = 45.0
 ERR_CLAMP_MS = 60_000.0  # client data; a whole minute of error is already absurd
+# A settled servo is not the same as a *steady* one. A node whose offset estimate
+# wobbles makes the servo chase a moving reference, and its error swings through
+# zero rather than parking - so its mean is still meaningful but any single
+# sample of it is not. Same shape of question as `skew_credible_at`, and given
+# the same answer: report the number, and separately report whether it is
+# distinguishable from the noise around it.
+ERR_MIN_ACKS = 8         # before then there is no spread to speak of
+ERR_CLOCK_SNR = 2.0      # |mean| must clear this many standard errors
 INTERVAL_IDLE = 2.0
 INTERVAL_BURSTING = 1.0
 
@@ -447,6 +455,13 @@ class Node:
         # start a fresh source under the same trackId, and all three reset the
         # servo. Anything read before ERR_SETTLE_S of this is a transient.
         self.run_since: Optional[float] = None
+        # Welford accumulators over the current run, in ppm, for the disturbance
+        # the servo is holding off: -(rate - 1) * 1e6. Kept incrementally rather
+        # than as a history buffer because the mean and the spread are the whole
+        # question - "is this parked or is it swinging" - and both are O(1).
+        self.dist_n = 0
+        self.dist_mean = 0.0
+        self.dist_m2 = 0.0
         self.burst_until = 0.0
         self.ping_boost = 1.0  # live cadence multiplier, for the control page
         self.kick = asyncio.Event()
@@ -467,6 +482,7 @@ class Node:
         self.play_rate = None
         self.err_seen_at = None
         self.run_since = None
+        self.reset_err_stats()
         self.burst_until = 0.0
         self.mic = False  # mic mode is per page-life; the client re-announces it
 
@@ -535,6 +551,25 @@ class Node:
             except (ConnectionError, RuntimeError):
                 pass  # the receive loop will notice and clean up
 
+    def reset_err_stats(self) -> None:
+        self.dist_n = 0
+        self.dist_mean = 0.0
+        self.dist_m2 = 0.0
+
+    def note_rate(self, rate: float) -> None:
+        """Fold one servo rate trim into this run's disturbance statistics."""
+        d = -(rate - 1.0) * 1e6
+        self.dist_n += 1
+        delta = d - self.dist_mean
+        self.dist_mean += delta / self.dist_n
+        self.dist_m2 += delta * (d - self.dist_mean)
+
+    @property
+    def dist_sd_ppm(self) -> Optional[float]:
+        if self.dist_n < 2:
+            return None
+        return math.sqrt(self.dist_m2 / (self.dist_n - 1))
+
     def _audio_clock_ppm(self, est) -> Optional[float]:
         """This node's AudioContext clock against its own performance.now(), ppm.
 
@@ -557,13 +592,32 @@ class Node:
         to 1.0, so a reading taken during the climb is a transient wearing a
         measurement's clothes; and a stale ack is not a reading at all.
         """
-        if self.play_rate is None or est is None or self.playing_track is None:
+        if est is None or self.playing_track is None or self.dist_n < ERR_MIN_ACKS:
             return None
         if self.err_seen_at is None or now() - self.err_seen_at > ERR_STALE_S:
             return None
         if self.run_since is None or now() - self.run_since < ERR_SETTLE_S:
             return None
-        return -(self.play_rate - 1.0) * 1e6 - est.skew_ppm
+        # The run mean, not the latest trim. A node whose offset estimate wobbles
+        # makes the servo chase it, so a single sample can be metres out while
+        # the mean is still the right answer - see `audio_clock_credible`.
+        return self.dist_mean - est.skew_ppm
+
+    def audio_clock_credible(self) -> bool:
+        """Is that mean distinguishable from the swing around it?
+
+        Deliberately the same shape as `ClockEstimate.skew_credible_at`, because
+        it is the same question: a number is only worth acting on when it clears
+        its own uncertainty. Here the uncertainty is the standard error of the
+        mean over this run, and a node whose error swings through zero fails it
+        no matter how long you watch - which is the correct answer, and the one
+        this whole thread spent three sessions failing to give.
+        """
+        sd = self.dist_sd_ppm
+        if sd is None or self.dist_n < ERR_MIN_ACKS:
+            return False
+        sem = sd / math.sqrt(self.dist_n)
+        return abs(self.dist_mean) >= ERR_CLOCK_SNR * sem
 
     def stats(self, current_track: Optional[str]) -> dict:
         est = self.model.estimate()
@@ -653,6 +707,14 @@ class Node:
             # None until the reading is both fresh and settled, because a rate
             # trim mid-climb is a transient and attributing it would be fiction.
             "audioClockPpm": self._audio_clock_ppm(est),
+            # How much the servo's trim moves about within this run, and whether
+            # the mean above clears it. A node parked on a real audio-clock
+            # offset has a small spread; one chasing a wobbling offset estimate
+            # swings through zero and its mean means nothing, however settled it
+            # looks. Until this existed the two were indistinguishable.
+            "distSdPpm": self.dist_sd_ppm,
+            "distN": self.dist_n,
+            "audioClockCredible": self.audio_clock_credible(),
         }
         if est is not None:
             d.update(
@@ -1757,6 +1819,8 @@ class Conductor:
                 node.err_seen_at = now()
             try:
                 node.play_rate = float(data["rate"])
+                if math.isfinite(node.play_rate):
+                    node.note_rate(node.play_rate)
             except (KeyError, ValueError, TypeError):
                 pass
         elif kind == "state":
@@ -1766,6 +1830,7 @@ class Conductor:
                 node.play_rate = None
                 node.err_seen_at = None
                 node.run_since = None
+                node.reset_err_stats()
             else:
                 # Every non-null report means a source just started at rate 1.0.
                 # player.js sends this from exactly one place (startSource), so
@@ -1773,6 +1838,7 @@ class Conductor:
                 # which a trackId comparison would miss, because a re-anchor
                 # restart, a seek and a catch-up all reuse the same trackId.
                 node.run_since = now()
+                node.reset_err_stats()
         elif kind == "spectrum":
             # Cosmetic per-node level meter, relayed straight to any open control
             # page — never stored, never touches timing. Clamp hard: client data.

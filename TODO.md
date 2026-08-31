@@ -305,8 +305,14 @@ the player audio path only when unavoidable, one commit per feature so
     which socket is asking (a real bug). Worth ten minutes with two sockets and
     a diff next time devices are up.
 
-- [ ] **The laptop<->phone mesh pair is missing on the hotspot setup**
-      (noticed 2026-08-27; may be a finding rather than a gap)
+- [x] ~~**The laptop<->phone mesh pair is missing on the hotspot setup**~~ —
+      **answered 2026-08-27 against a control.** The same two devices form the
+      pair immediately on the local network (rtt 4.90, n=16). It was the phone's
+      access point, exactly as Matthew read it: fine at *forwarding* UDP between
+      clients, unreachable as a WebRTC peer on its own hotspot interface. Left
+      here rather than deleted because it is the reason the mesh needs to say
+      *why* a pair is absent — see the item above.
+  - Original note:
   - Fleet was laptop + phone + "Mums tablet", with the **phone acting as the
     access point** and both others as its clients. The mesh table showed only
     `tablet<->laptop` and `tablet<->phone`. The third pair never appeared.

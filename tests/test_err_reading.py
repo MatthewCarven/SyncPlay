@@ -28,6 +28,7 @@ import pytest
 
 from syncplay.conductor import (
     ERR_CLAMP_MS,
+    ERR_MIN_ACKS,
     ERR_SETTLE_S,
     ERR_STALE_S,
     Conductor,
@@ -50,11 +51,21 @@ class Est:
         self.skew_ppm = skew_ppm
 
 
-def settled(node, err_ms=6.0, rate_ppm=-400.0, age=0.0, run=ERR_SETTLE_S + 15.0):
+def settled(node, err_ms=6.0, rate_ppm=-400.0, age=0.0, run=ERR_SETTLE_S + 15.0,
+            acks=20, swing_ppm=0.0):
+    """Put a node into a settled, freshly-acked state.
+
+    `swing_ppm` makes the servo trim alternate about its mean by that much,
+    which is what a node chasing a wobbling offset estimate actually does — the
+    mean survives, the credibility does not.
+    """
     node.sync_err_ms = err_ms
     node.play_rate = 1.0 + rate_ppm / 1e6
     node.err_seen_at = now() - age
     node.run_since = now() - run
+    node.reset_err_stats()
+    for i in range(acks):
+        node.note_rate(1.0 + (rate_ppm + (swing_ppm if i % 2 else -swing_ppm)) / 1e6)
     return node
 
 
@@ -191,3 +202,64 @@ def test_an_outrageous_err_is_clamped_not_dropped():
         cond, n, {"type": "steerAck", "errMs": 1e12, "rate": 1.0}, now()))
     assert n.sync_err_ms == ERR_CLAMP_MS
     assert n.err_seen_at is not None
+
+
+# --- settled is not the same as steady -------------------------------------
+
+
+def test_a_parked_node_is_credible(node):
+    settled(node, rate_ppm=-400.0, swing_ppm=5.0)
+    assert node.audio_clock_credible() is True
+    assert node._audio_clock_ppm(Est(20.1)) == pytest.approx(379.9, abs=0.5)
+
+
+def test_a_node_swinging_through_zero_is_not_credible(node):
+    """The failure this whole thread was built on. Live readings from an
+    Android 6 tablet: err swung -6.18 .. +7.23 ms while the laptop beside it
+    held +/-0.07. Every single-sample reading of that node looked like a
+    parked offset; it is a servo chasing a moving reference, and its mean is
+    near zero. It must be refused however long it has been running."""
+    settled(node, rate_ppm=0.0, swing_ppm=400.0)
+    assert node.dist_sd_ppm > 300
+    assert node.audio_clock_credible() is False
+
+
+def test_a_swinging_node_still_reports_its_mean_and_spread(node):
+    """Refused is not hidden. The spread is the evidence, so it must be
+    readable — that is the whole difference between this and a silent None."""
+    settled(node, rate_ppm=-30.0, swing_ppm=400.0)
+    d = node.stats("t1")
+    assert d["distSdPpm"] > 300
+    assert d["distN"] == 20
+    assert d["audioClockCredible"] is False
+    # The mean itself still resolves once there is an estimate to subtract the
+    # fitted slope from; `stats` reports None here only because this bare Node
+    # has no samples in its model, which is a different absence entirely.
+    assert d["audioClockPpm"] is None
+    assert node._audio_clock_ppm(Est(0.0)) == pytest.approx(30.0, abs=0.5)
+
+
+def test_too_few_acks_is_refused_however_settled(node):
+    settled(node, acks=ERR_MIN_ACKS - 1)
+    assert node._audio_clock_ppm(Est(20.1)) is None
+    assert node.audio_clock_credible() is False
+
+
+def test_a_new_run_forgets_the_previous_run_stats():
+    """A restart resets the trim to 1.0, so carrying the old spread across would
+    describe a servo that no longer exists."""
+    cond = Conductor.__new__(Conductor)
+    n = settled(Node("id", "n"))
+    assert n.dist_n == 20
+    asyncio.run(Conductor._on_player_msg(
+        cond, n, {"type": "state", "playing": "t1"}, now()))
+    assert n.dist_n == 0 and n.dist_mean == 0.0
+
+
+def test_the_mean_survives_a_swing_that_kills_credibility(node):
+    """Mean and credibility are independent claims: a node can be swinging
+    wildly and still have a mean worth reporting, which is why they are two
+    fields and not one."""
+    settled(node, rate_ppm=-100.0, swing_ppm=400.0)
+    assert node._audio_clock_ppm(Est(0.0)) == pytest.approx(100.0, abs=0.5)
+    assert node.audio_clock_credible() is False

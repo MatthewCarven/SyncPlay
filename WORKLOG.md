@@ -1727,3 +1727,93 @@ A pair that never connected, a pair with no samples yet, and a pair whose
 channel died are all rendered identically — as no row at all. The mesh's entire
 job is to be the independent referee, and it can vanish without saying so. On a
 phone hotspot that is not a rare corner: it is Tuesday.
+
+## 2026-08-27 (cont.) — five nodes playing, and the answer was in the TODO all along
+
+Matthew put five devices up on the **local network** (not the hotspot) and played
+a track: laptop, pc, phone, the old `Id10terror-tablet` and the borrowed
+`Mums-Tablet`. Read-only observer throughout. This is the first time any of the
+`err` instrumentation has been exercised against real hardware, and it earned
+its keep by proving three sessions of my reasoning wrong.
+
+**The hotspot was the cause of the missing mesh pair.** `ID10TError-Laptop1 <->
+Id10terror-phone` — the pair that refused to form for ten minutes behind the
+phone's access point — appears immediately on the local network (rtt 4.90,
+n=16). Same two devices. Matthew's read was right and the TODO item can be
+closed against a control rather than a theory.
+
+**The endpoint-cost fit is finally over-determined and it holds.** 8 mesh pairs
+plus 4 WebSocket constraints = 12 equations for 6 unknowns, **6 degrees of
+freedom, rms residual 0.35 ms** over a 1.9-6.7 ms range:
+
+    ID10TError-pc         0.22 ms one-way
+    ID10TError-Laptop1    0.88
+    Mums-Tablet           2.14
+    Id10terror-tablet     2.16
+    Id10terror-phone      2.55
+    [DataChannel]         1.51 ms overhead
+
+The laptop has now been fitted on three unrelated networks — router, phone
+hotspot, local — at **0.87 / 0.85 / 0.88 ms**. That is a device constant, and it
+is the strongest evidence yet that this measures hardware rather than curve-fits
+a topology. The two tablets land at 2.16 and 2.14: old and new, indistinguishable.
+
+**First live `audioClockPpm` readings, and they are all ordinary crystals:**
+
+    Mums-Tablet        err -0.53   audio clock  -48 ppm
+    Id10terror-phone   err -0.43                -38 ppm
+    ID10TError-Laptop1 err +0.07                 +5 ppm
+    ID10TError-pc      err +0.53                 +8 ppm
+
+Within the +/-50-100 ppm class consumer audio hardware is built to, and
+arithmetically self-consistent: Mums-Tablet at eps = -48 + 13.1 = -34.9 ppm
+predicts err = 15 x -34.9e-6 = -0.52 ms against -0.53 measured. Four-node spread
+1.06 ms = 0.36 m of air.
+
+**And then the finding that overturns the whole thread.** Sampling the old
+tablet against the laptop every ten seconds:
+
+    tablet  +4.66  -4.90  +1.40  -6.18  +0.34  +5.32  +7.23  +4.28
+    laptop  -0.04  -0.04  -0.03  +0.05  +0.03  +0.02  -0.07  -0.07
+
+**It swings through zero.** Range -6.18 to +7.23, mean near +1.5, while
+`runS` climbed 179 -> 249 in step with the wall clock (so it was *not*
+restarting — an earlier claim of mine that held only for the window right after
+Matthew rejoined it).
+
+The July TODO called this exactly: *"Swings through zero to -5 or so -> its
+offset estimate was wobbling and the servo was chasing a moving reference; a
+nudge would be actively wrong because you'd be biasing against a number that
+averages to zero."* Hypothesis 2. It was right, and it has been sitting there
+since 2026-07-28 while I built an increasingly elaborate case for hypothesis 1.
+
+Every reading this investigation rested on — +6.5 (July), +6.0 (August), +2.8
+and +4.4 today — was **a single sample of a swinging signal**, read as a parked
+value. The P-droop law is still correct physics and still explains the four
+well-behaved nodes; it simply never applied to this one, because a node whose
+reference is moving has no steady state to droop to. Context Matthew supplied
+that fits: the device is **Android 6** with memory problems, and it drops out.
+
+**The hole that exposed in this morning's commit, now closed.** `audioClockPpm`
+gated on *fresh* and *settled* but not on *steady*, so a node swinging +/-6 ms
+sailed through and got a confident-looking attribution made of noise. It now
+keeps Welford accumulators over the run for the disturbance `-(rate-1)*1e6`,
+reports the **mean** rather than the latest trim, and exposes `distSdPpm`,
+`distN` and `audioClockCredible`.
+
+The credibility test is deliberately the same shape as
+`ClockEstimate.skew_credible_at` — `|mean| >= 2 x sem` — because it is the same
+question: a number is only worth acting on when it clears its own uncertainty. A
+node swinging through zero fails it however long you watch, which is the correct
+answer and the one this thread spent three sessions failing to give. Refused is
+not hidden: the mean and the spread stay readable, because the spread is the
+evidence.
+
+275 tests (6 new). Conductor only — **no fleet reload**, but the running
+conductor needs a restart to pick it up.
+
+**Also observed, worth keeping.** Sample survival on the local network: laptop
+99.5%, pc 70-75%, phone 13-17%, both tablets 7-9%. The two tablets are
+indistinguishable again. And a track change put the pc at **err -28.81 ms** at
+`runS 19` — a large, real transient that the settling gate correctly refuses to
+attribute, which is the first time that guard has visibly earned its place.
