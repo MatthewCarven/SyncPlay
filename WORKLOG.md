@@ -1922,3 +1922,49 @@ no throw, still playing, steer still acked, refusal voiced with the numbers.
 Eight checks. 279 Python tests (2 new in `test_guards.py`).
 
 **Needs a fleet reload** — `player.js`. Rides with the reload already owed.
+
+## 2026-08-27 (cont.) — closing the slew dead zone
+
+Second half of the reload-owed work, and it comes straight out of what Matthew
+heard today rather than out of reading.
+
+**The gap.** The servo saturates at `MAX_RATE_TRIM * STEER_HORIZON_S` = 12 ms.
+Past that it is at full authority and removes error only *linearly*, at 800 ppm
+— 0.8 ms per second. `REANCHOR_S` is 200 ms. So everything between roughly
+12 ms and 200 ms is in a hole: too small to restart, too large to slew in any
+useful time. Mums-Tablet actually hit **+122 ms**, which is 152 seconds of
+slewing, and a track change landing first resets the attempt from scratch. That
+is what "they are definitely out of sync now" sounded like.
+
+**Why the obvious fix is wrong.** Lowering `REANCHOR_S` to catch it would put
+the Android 6 tablet — which swings through +/-12 ms continuously, measured over
+five captures — into a permanent restart loop, trading a fixable problem for an
+unfixable one. The two failures are indistinguishable by *magnitude*. What
+separates them is **persistence**: a swinging error crosses zero every few
+seconds, a stranded one does not.
+
+**So the servo now waits, and then gives up.** `SLEW_LIMIT_S` (24 ms, written as
+`2 * MAX_RATE_TRIM * STEER_HORIZON_S` so it tracks the saturation point rather
+than being a magic number) starts a clock on `current.slewSince`, cleared the
+instant the error comes back inside. If it is still out after `SLEW_PATIENCE_S`
+(10 s), the existing re-anchor path runs: one discontinuity now beats another
+minute of being audibly in the wrong place. A swinging node clears the timer
+constantly and is never restarted; `REANCHOR_S` still fires immediately on a
+genuine 400 ms fault.
+
+Worked example: 122 ms stranded goes from 152 s of audible echo to a restart
+after 10 s. +/-12 ms swinging is untouched, as it must be.
+
+**Verified in `tools/reanchor_harness.js`**, extended to 16 checks. The
+dead-zone half drives the shipped `onSteer` through three scenarios — stranded
+at 120 ms, swinging +/-12 ms for 80 s of 2 s steers, and a 400 ms fault — and
+asserts the restart happens in exactly one of them.
+
+One harness lesson worth keeping, because it cost two runs: the first draft
+reimplemented `posAt` to construct a steer with a known error, and quietly
+omitted its `Math.max(0, ...)` clamp, so the errors it thought it was injecting
+were not the ones the servo saw. It now calls the shipped `posAt` and subtracts.
+A harness that reimplements the thing it is testing is testing its own copy.
+
+279 Python tests unchanged. **Needs a fleet reload** — rides with the refused-start
+fix in `5e7cc2d`.

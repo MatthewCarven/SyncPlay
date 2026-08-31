@@ -39,6 +39,7 @@ function build(startSrc) {
     let current = null, nudgeMs = 0;
     const sent = [];
     const REANCHOR_S = 0.2, MAX_RATE_TRIM = 8e-4, STEER_HORIZON_S = 15;
+    const SLEW_LIMIT_S = 2 * MAX_RATE_TRIM * STEER_HORIZON_S, SLEW_PATIENCE_S = 10;
     const eq = null, master = {};
     const ctx = {
       currentTime: 100.0,
@@ -55,13 +56,18 @@ function build(startSrc) {
     ${startSrc}
     ${fn("onSteer")}
     return {
-      seed(buf, id) {
+      seed(buf, id, anchorPos = 0) {
         current = { src: ctx.createBufferSource(), trackId: id, title: "t",
-                    rate: 1, anchorCtx: 0, anchorPos: 0, startedCtx: 0 };
+                    rate: 1, anchorCtx: 0, anchorPos, startedCtx: 0, slewSince: null };
         cache.set(id, buf);
       },
       steer: (m) => onSteer(m),
+      advance: (s) => { ctx.currentTime += s; },
+      now: () => ctx.currentTime,
+      posAt: (t) => posAt(t),
       get current() { return current; },
+      get rate() { return current ? current.rate : null; },
+      get slewSince() { return current ? current.slewSince : null; },
       sent,
     };
   `)();
@@ -109,6 +115,61 @@ check("shipped order still acks the steer", after.ack);
 check("shipped order voices the refusal", !!after.refusal);
 check("refusal carries the numbers that explain it",
       !!after.refusal && after.refusal.seekMs === 181080 && after.refusal.durationMs === 60000);
+
+
+// --- the slew dead zone ----------------------------------------------------
+// A node stranded past what the servo can pull must not be left slewing for
+// minutes; a node swinging through zero must never be restarted at all. Both
+// are driven here through the shipped onSteer.
+
+function steerAt(h, errMs) {
+  // Build a steer whose implied error is exactly errMs, by asking the SHIPPED
+  // posAt() where we will be and subtracting. Reimplementing posAt here is what
+  // broke the first draft of this: it has a Math.max(0, ...) clamp that a
+  // hand-rolled copy quietly omitted.
+  const t = h.now();
+  const atNodeMs = 100000 + (t - 100) * 1000;   // maps through perfToCtx to t
+  h.steer({ trackId: "trk", posMs: (h.posAt(t) - errMs / 1000) * 1000, atNodeMs });
+}
+
+// 1. stranded: 120 ms out and staying there
+{
+  const h = build(fn("startSource"));
+  h.seed({ duration: 600.0 }, "trk", 100.0);
+  const before = h.current.src;
+  steerAt(h, 120);
+  check("stranded: does not restart immediately (below REANCHOR_S)", h.current.src === before);
+  check("stranded: starts counting how long it has been out", h.slewSince !== null);
+  h.advance(4); steerAt(h, 120);
+  check("stranded: still patient at 4 s", h.current.src === before);
+  h.advance(8); steerAt(h, 120);
+  check("stranded: restarts once patience runs out", h.current.src !== before);
+  check("stranded: the fresh source starts un-trimmed", h.rate === 1);
+}
+
+// 2. swinging: +/-12 ms crossing zero — the live Android 6 tablet
+{
+  const h = build(fn("startSource"));
+  h.seed({ duration: 600.0 }, "trk", 100.0);
+  const before = h.current.src;
+  let restarted = false;
+  for (let i = 0; i < 40; i++) {            // 80 s of 2 s steers
+    steerAt(h, i % 2 ? 12 : -12);
+    h.advance(2);
+    if (h.current.src !== before) restarted = true;
+  }
+  check("swinging +/-12 ms for 80 s never triggers a restart", !restarted);
+  check("swinging: the out-of-range timer keeps being cleared", h.slewSince === null);
+}
+
+// 3. a real fault still restarts at once
+{
+  const h = build(fn("startSource"));
+  h.seed({ duration: 600.0 }, "trk", 100.0);
+  const before = h.current.src;
+  steerAt(h, 400);                          // past REANCHOR_S
+  check("400 ms restarts immediately, without waiting", h.current.src !== before);
+}
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : "\nall checks passed");
 process.exit(fails ? 1 : 0);

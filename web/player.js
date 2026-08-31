@@ -55,6 +55,21 @@ let current = null;      // {src, trackId, title, rate, anchorCtx, anchorPos, st
 const STEER_HORIZON_S = 15;  // aim to null the position error over ~this long
 const MAX_RATE_TRIM = 8e-4;  // ±800 ppm ≈ 1.4 cents of pitch — inaudible
 const REANCHOR_S = 0.2;      // beyond this, slewing is hopeless: restart in place
+// Between the two lines above there is a gap the servo cannot cover in any
+// reasonable time. It saturates at MAX_RATE_TRIM * STEER_HORIZON_S = 12 ms;
+// past that it is at full authority and removes error only *linearly*, at
+// 800 ppm — 0.8 ms per second. So a 122 ms error (observed live, 2026-08-27) is
+// too small to trip REANCHOR_S and takes 152 s to slew away. Two and a half
+// minutes of audible echo, and a track change landing first resets the attempt.
+//
+// The fix is not a lower REANCHOR_S. A node whose offset estimate wobbles
+// swings through +/-12 ms continuously (also observed live), and a threshold low
+// enough to catch a stuck node would put a swinging one into a restart loop —
+// trading a fixable problem for an unfixable one. What separates them is not
+// magnitude but *persistence*: a swinging error crosses zero every few seconds,
+// a stuck one does not. So this waits.
+const SLEW_LIMIT_S = 2 * MAX_RATE_TRIM * STEER_HORIZON_S;  // 24 ms; 2x saturation
+const SLEW_PATIENCE_S = 10;  // still out there after this long, and slewing lost
 
 // --- clock mapping: performance.now() ms -> AudioContext seconds -------------
 // getOutputTimestamp() returns a correlated pair: "context position X was/will
@@ -455,6 +470,7 @@ function startSource(buf, trackId, title, whenCtx, seekS) {
   current = {
     src, trackId, title,
     rate: 1, anchorCtx: whenCtx, anchorPos: seekS, startedCtx: whenCtx,
+    slewSince: null,
   };
   src.onended = () => {
     if (current && current.src === src) {
@@ -487,8 +503,22 @@ function onSteer(msg) {
   if (targetCtx <= current.startedCtx + 0.05) return; // reference predates our start
   const errS = posAt(targetCtx) - msg.posMs / 1000;   // + = we're ahead
 
-  if (Math.abs(errS) > REANCHOR_S) {
+  // How long have we been out past where the servo can usefully pull? Cleared
+  // the moment the error comes back inside, which is what makes this blind to a
+  // node swinging through zero and sensitive to one genuinely stranded.
+  if (Math.abs(errS) > SLEW_LIMIT_S) {
+    if (current.slewSince == null) current.slewSince = ctx.currentTime;
+  } else {
+    current.slewSince = null;
+  }
+  const slewLost = current.slewSince != null
+                   && ctx.currentTime - current.slewSince > SLEW_PATIENCE_S;
+
+  if (Math.abs(errS) > REANCHOR_S || slewLost) {
     // Stall/suspend/mistiming too big to slew away — restart at the ideal spot.
+    // Also reached when the servo has been at full authority for
+    // SLEW_PATIENCE_S and is still losing: one discontinuity now beats another
+    // minute of being audibly in the wrong place.
     const buf = cache.get(msg.trackId);
     if (!buf) return;
     const nowCtx = ctx.currentTime;
