@@ -616,6 +616,17 @@ class Node:
         sd = self.dist_sd_ppm
         if sd is None or self.dist_n < ERR_MIN_ACKS:
             return False
+        # A disturbance this large is not an oscillator. MAX_PERSISTED_SKEW is
+        # already this codebase's line between a crystal and a broken number,
+        # and it applies to an audio clock for the same reason it applies to a
+        # CPU one. Past it the servo is also out of authority (player.js clamps
+        # the trim at 800 ppm), so `err` has no equilibrium to settle to and its
+        # mean is the average of a diverging signal rather than a measurement.
+        # Observed live: a node that had just reconnected read +1285 ppm off a
+        # mean of +19 ms with peaks at +122 ms, and cleared the SNR test easily
+        # because a runaway is not a noisy signal - it is a confident wrong one.
+        if abs(self.dist_mean) > MAX_PERSISTED_SKEW * 1e6:
+            return False
         sem = sd / math.sqrt(self.dist_n)
         return abs(self.dist_mean) >= ERR_CLOCK_SNR * sem
 

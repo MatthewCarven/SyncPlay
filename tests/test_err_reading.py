@@ -29,6 +29,7 @@ import pytest
 from syncplay.conductor import (
     ERR_CLAMP_MS,
     ERR_MIN_ACKS,
+    MAX_PERSISTED_SKEW,
     ERR_SETTLE_S,
     ERR_STALE_S,
     Conductor,
@@ -262,4 +263,25 @@ def test_the_mean_survives_a_swing_that_kills_credibility(node):
     fields and not one."""
     settled(node, rate_ppm=-100.0, swing_ppm=400.0)
     assert node._audio_clock_ppm(Est(0.0)) == pytest.approx(100.0, abs=0.5)
+    assert node.audio_clock_credible() is False
+
+
+def test_a_runaway_is_not_a_credible_audio_clock(node):
+    """Live failure, 2026-08-27: a node that had just reconnected showed a mean
+    error of +19 ms with peaks at +122 ms, implying 1285 ppm. It passed the SNR
+    test comfortably, because a runaway is not a noisy signal — it is a
+    confident wrong one, and its mean clears its own standard error easily.
+
+    Two independent reasons it must be refused. No oscillator is 1285 ppm; and
+    past 800 ppm the servo is out of trim authority entirely, so there is no
+    equilibrium for `err` to settle to and the mean is the average of a
+    diverging signal."""
+    settled(node, rate_ppm=-1285.0, swing_ppm=20.0)
+    assert node.audio_clock_credible() is False
+
+
+def test_the_boundary_of_believable(node):
+    settled(node, rate_ppm=-(MAX_PERSISTED_SKEW * 1e6 - 1), swing_ppm=5.0)
+    assert node.audio_clock_credible() is True
+    settled(node, rate_ppm=-(MAX_PERSISTED_SKEW * 1e6 + 1), swing_ppm=5.0)
     assert node.audio_clock_credible() is False
