@@ -430,8 +430,24 @@ function posAt(ctxT) {
 }
 
 function startSource(buf, trackId, title, whenCtx, seekS) {
+  // Refuse BEFORE tearing down what is playing. The old order called
+  // stopCurrent() — which nulls `current` — and only then bailed on this
+  // guard, so a refused start left the node silent with `current` null and
+  // `onended` already detached: no `state` was ever sent, the conductor went on
+  // steering a node that had stopped, and onSteer's own tail dereferenced the
+  // null and threw. Refusing first makes a refusal cost nothing: whatever was
+  // playing keeps playing and ends naturally.
+  //
+  // Written as !(a < b) rather than a >= b so a NaN seek is refused too — that
+  // is the one value that would sail through the old comparison and hand
+  // src.start() an argument it cannot use.
+  if (!(seekS < buf.duration)) {
+    send({ type: "startRefused", trackId,
+           seekMs: Math.round(seekS * 1000),
+           durationMs: Math.round(buf.duration * 1000) });
+    return false;
+  }
   stopCurrent();
-  if (seekS >= buf.duration) return;
   const src = ctx.createBufferSource();
   src.buffer = buf;
   src.connect(eq ? eq.input : master);
@@ -449,6 +465,7 @@ function startSource(buf, trackId, title, whenCtx, seekS) {
   };
   setNowPlaying(title || trackId);
   send({ type: "state", playing: trackId });
+  return true;
 }
 
 function startBuffer(buf, msg) {

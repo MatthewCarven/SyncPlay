@@ -161,6 +161,19 @@ def _clean_err_ms(v) -> Optional[float]:
     return max(-ERR_CLAMP_MS, min(ERR_CLAMP_MS, e))
 
 
+def _clean_pos_ms(v) -> Optional[float]:
+    """A position or duration off the wire, in ms. Distinct from
+    `_clean_err_ms`, whose 60-second clamp is right for a servo error and very
+    wrong for a track length."""
+    try:
+        t = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(t):
+        return None
+    return max(0.0, min(24 * 3600 * 1000.0, t))
+
+
 def _clean_skew(v) -> Optional[float]:
     """Validate a persisted skew (s/s). None if it isn't a plausible crystal.
 
@@ -1776,6 +1789,28 @@ class Conductor:
             # entry means the load gate counts the node ready, skips it, and it
             # joins late through `_catchup` instead of starting with everyone.
             node.loaded.discard(str(data.get("trackId")))
+        elif kind == "startRefused":
+            # A node declined to start a source because the seek lands at or
+            # past the end of the buffer it holds. It keeps playing whatever it
+            # already had, so this is a report rather than a failure — but it is
+            # reported precisely because the silent version of it cost a node a
+            # whole track: the old code tore down playback first and bailed
+            # second, leaving a node that had stopped while the conductor went
+            # on steering it. End-of-track arithmetic is the common cause; a
+            # short or truncated decode is the one worth chasing.
+            seek = _clean_pos_ms(data.get("seekMs"))
+            dur = _clean_pos_ms(data.get("durationMs"))
+            log.warning(
+                "%s: refused a start at %s into a %s buffer (track %s)",
+                node.name,
+                "?" if seek is None else f"{seek / 1000.0:.2f}s",
+                "?" if dur is None else f"{dur / 1000.0:.2f}s",
+                str(data.get("trackId"))[:12],
+            )
+            await self.toast(
+                f"{node.name}: refused a start past the end of its buffer "
+                "- it kept playing what it had"
+            )
         elif kind == "loadError":
             # A failed load must retire the whole pill, not just its timer.
             # Leaving load_track/load_pct set was how a node that gave up

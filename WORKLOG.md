@@ -1880,3 +1880,45 @@ actual failure rather than one of its causes.
 
 Fleet at the end: **0.46 ms spread = 0.16 m of air**, 10/10 mesh pairs, worst
 closure 1.62 ms (on the n=9 pair; the n=114 pair reads -0.04).
+
+## 2026-08-27 (cont.) — a refused start no longer kills the node
+
+Found by reading, not by watching, while the hypothesis panel mapped the servo
+path — and then Matthew lost `Mums-Tablet` **at a track change**, which is
+exactly the window the bug lives in.
+
+`startSource()` called `stopCurrent()` — which nulls `current` — and only *then*
+bailed on `seekS >= buf.duration`. Everything follows from that order:
+
+- the node is silent, because the source was already torn down;
+- it never says so, because `onended` was detached during the teardown, so no
+  `state` message is ever sent;
+- the conductor goes on steering a node that has stopped, indefinitely;
+- and `onSteer`'s own tail dereferences the null (`rate: current.rate`) and
+  throws, killing the handler for good.
+
+Reachable at end of track, where `+ (nowCtx + 0.08 - targetCtx)` makes the
+re-anchor's seek adjustment largest, and on a short or truncated decode.
+`_steer_all` declines only the last 400 ms, so the window is genuinely open.
+
+**Fix:** refuse before tearing anything down, and give the refusal a voice. The
+guard is written `!(seekS < buf.duration)` rather than `seekS >= buf.duration`
+so a NaN seek is refused too — the one value that sails through the old
+comparison and reaches `src.start()`. `startSource` now returns a boolean, and a
+refusal costs nothing: whatever was playing keeps playing and ends naturally.
+The node sends `startRefused` with its numbers; the conductor logs a warning
+naming the node and toasts. Same instinct as `b5de5b0` — the silent version of
+this cost a node a whole track.
+
+`_clean_pos_ms` is new and separate from `_clean_err_ms` on purpose: the
+latter's 60-second clamp is right for a servo error and very wrong for a track
+length, and reusing it turned 181.40s into 60.00s in the first draft of the test.
+
+**Verified before and after** in `tools/reanchor_harness.js`, which extracts and
+evals the shipped `perfToCtx`/`stopCurrent`/`posAt`/`startSource`/`onSteer`
+straight out of `player.js` (same approach as `tools/level_harness.js`) and runs
+the old order beside them. Old: TypeError, node silent, nothing reported. New:
+no throw, still playing, steer still acked, refusal voiced with the numbers.
+Eight checks. 279 Python tests (2 new in `test_guards.py`).
+
+**Needs a fleet reload** — `player.js`. Rides with the reload already owed.
