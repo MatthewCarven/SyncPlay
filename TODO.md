@@ -405,22 +405,19 @@ the player audio path only when unavoidable, one commit per feature so
     `ctx.baseLatency` — the dashboard wishlist wants all three anyway, and they
     say whether the deep-buffer/offload path is in play.
 
-- [ ] **`onSteer` can dereference a nulled `current` and kill a node silently**
-      (found 2026-08-27; needs `player.js`, so a fleet reload and its own commit)
-  - The re-anchor branch calls `startSource`, which calls `stopCurrent()` (which
-    sets `current = null`) and *then* early-returns on
-    `if (seekS >= buf.duration) return`. Control falls through to player.js:489,
-    `rate: current.rate` — TypeError on null.
-  - Cost: the node is silent, `onended` was already detached so no `state` is
-    sent, and the conductor keeps steering a node that is not playing for the
-    rest of the track. Exactly the failure shape as the two fixed in `b5de5b0`.
-  - Reachable **at end-of-track**, where `+ (nowCtx + 0.08 - targetCtx)` makes
-    the seek largest — and `_steer_all` only declines the last 400 ms, so the
-    window is open. Also reachable on a short or truncated decode.
-  - Fix is small (bail before `stopCurrent`, or ack defensively), but the real
-    value is giving it a voice rather than a silent return.
-  - **This is the first thing to check** if `err ms` ever renders stale: a dead
-    ack stream is exactly what this bug looks like from the conductor.
+- [x] ~~**`onSteer` can dereference a nulled `current`**~~ — **fixed 2026-08-27**
+      (`5e7cc2d`). `startSource` now refuses *before* `stopCurrent()`, returns a
+      boolean, and sends `startRefused`; the conductor logs and toasts it. Guard
+      written `!(seekS < buf.duration)` so a NaN seek is refused too. Verified
+      old-vs-new in `tools/reanchor_harness.js`. **Needs the fleet reload.**
+
+- [x] ~~**The slew dead zone**~~ — **fixed 2026-08-27** (`99e1789`). Between the
+      servo's 12 ms saturation point and `REANCHOR_S` (200 ms) nothing could be
+      corrected in useful time; a live node at +122 ms faced 152 s of echo.
+      Lowering `REANCHOR_S` was not an option because the Android 6 tablet
+      swings +/-12 ms and would have restart-looped, so the servo now times how
+      long it has been outside `SLEW_LIMIT_S` (24 ms) and re-anchors after
+      `SLEW_PATIENCE_S` (10 s) only if it *stays* out. **Needs the fleet reload.**
 
 - [ ] **Follow-ups to the err-reading slice** (2026-08-27, all optional)
   - **A trace that outlives the process.** The shipped fields answer "what is it
