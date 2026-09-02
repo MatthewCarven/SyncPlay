@@ -56,6 +56,16 @@ LOAD_GATE_COLD = 20.0     # cold start: a 70 MB decode from nothing needs room
 STRAGGLER_GRACE_FRAC = 0.75
 ARM_SECONDS = 6.0         # visible countdown floor before a cold start
 PENDING_PING_TTL = 5.0
+# A start needs a clock estimate worth committing to, not merely one that
+# exists. Before `min_slope_span` a model's anchor is a median that moves with
+# every sample and its slope is an assertion of zero, so a start timed from it
+# is a guess that will be re-fitted out from under the servo for the next half
+# minute - which is precisely what a freshly reconnected tablet did at a track
+# change on 2026-08-27 (mean +19 ms, peaks +122 ms). A node with a remembered
+# crystal is the exception the whole remembered-skew feature exists for: its
+# window is de-trended by the prior, so a handful of samples is enough.
+MIN_JOIN_SAMPLES = 8
+CATCHUP_WAIT_S = 35.0     # long enough for a young model to fit its own slope
 MAX_QUEUE = 200           # sanity cap on the explicit play queue
 MAX_PERSISTED_SKEW = 500e-6  # 500 ppm; past this it's a bad fit, not a crystal
 # How far a fitted slope must clear its own worst-case error before we are
@@ -273,6 +283,31 @@ def plan_start(playing_now: bool, loaded: List[bool]) -> Tuple[bool, float]:
     return cold, (LOAD_GATE_COLD if cold else LOAD_GATE_TIMEOUT)
 
 
+def start_ready(model: ClockModel) -> bool:
+    """Is this node's clock good enough to time a start from?
+
+    Three answers, in order:
+
+    * No estimate at all: no.
+    * The window has fitted its own slope (`skew_fitted`, i.e. 30 s of span and
+      enough samples): yes. The anchor is centred and stable.
+    * Otherwise, only if the node carries a remembered crystal *and* has enough
+      samples for the de-trended median to mean something. Without a prior a
+      young model is an anchor that jumps on every ping, and a start timed from
+      it is one the servo will spend the next thirty seconds chasing.
+
+    Pure, so the rule can be pinned without a fleet. The cost of "no" is never
+    "everyone waits": the node is deferred and `_catchup` brings it in the
+    moment this turns true - the same bargain the load gate already makes.
+    """
+    est = model.estimate()
+    if est is None:
+        return False
+    if est.skew_fitted:
+        return True
+    return model.prior_skew is not None and est.n_used >= MIN_JOIN_SAMPLES
+
+
 def hold_gate(
     n_ready: int, n_connected: int, quiet_for: float, grace: float
 ) -> bool:
@@ -484,6 +519,7 @@ class Node:
         self.ping_boost = 1.0  # live cadence multiplier, for the control page
         self.kick = asyncio.Event()
         self.ping_task: Optional[asyncio.Task] = None
+        self.catchup_task: Optional[asyncio.Task] = None
         # Which build of player.js this node loaded; None until it says hello,
         # and None forever from a page too old to carry the stamp — which is
         # itself the answer to "has this one reloaded?".
@@ -1252,10 +1288,26 @@ class Conductor:
         self.arming = None  # the play command below is what retires the countdown
         t_start = now() + PLAY_LEAD
         self.playing = Playback(track=track, t_start=t_start, seek_ms=seek_ms)
-        started = []
+        started, deferred = [], []
         for node in ready:
             if await self._send_play(node, self.playing):
                 started.append(node.name)
+            else:
+                deferred.append(node)
+        if deferred:
+            # Holding the track but not yet timeable - a model too young to fit
+            # its own slope, or with no estimate at all. Same bargain as a node
+            # still decoding: the room does not wait, the node joins the moment
+            # its clock is worth committing to. Say so, or a speaker that comes
+            # in half a minute after the others looks like a fault.
+            names = ", ".join(n.name for n in deferred)
+            log.info('starting "%s" without %s - clock still settling',
+                     track.title, names)
+            await self.toast(
+                f"Starting without {names} - clock still settling, will join automatically."
+            )
+            for node in deferred:
+                self._dispatch_catchup(node, track.id)
         if started:
             log.info(
                 'play "%s" at T+%.1fs seek=%.0fms -> %s',
@@ -1270,8 +1322,8 @@ class Conductor:
                 'play "%s": no node could be timed - nothing started', track.title
             )
             await self.toast(
-                f'Could not start "{track.title}" - no node has a clock estimate '
-                "yet. Give it a few seconds and press play again."
+                f'Could not start "{track.title}" - no node has a clock worth '
+                "timing from yet. They join automatically as their clocks settle."
             )
         self._advance_task = asyncio.create_task(self._auto_advance(self.playing))
         # Get the *next* track decoding everywhere while this one plays.
@@ -1309,10 +1361,12 @@ class Conductor:
         await node.send(msg)
 
     async def _send_play(self, node: Node, p: Playback) -> bool:
-        """Drift-projected start command for one node. False if it can't be timed."""
-        est = node.model.estimate()
-        if est is None:
+        """Drift-projected start command for one node. False if it can't be timed.
+
+        "Can't" now includes "not yet well enough" - see `start_ready`."""
+        if not start_ready(node.model):
             return False
+        est = node.model.estimate()
         at_node_ms = est.to_node_time(p.t_start) * 1000.0
         await node.send(
             {
@@ -1325,13 +1379,28 @@ class Conductor:
         )
         return True
 
+    def _dispatch_catchup(self, node: Node, track_id: str) -> None:
+        """One catch-up per node at a time: a node can report `loaded` twice, and
+        it can be deferred at a start and then report `loaded` - two concurrent
+        catch-ups would both send play."""
+        t = node.catchup_task
+        if t is not None and not t.done():
+            return
+        node.catchup_task = asyncio.create_task(self._catchup(node, track_id))
+
     async def _catchup(self, node: Node, track_id: str) -> None:
-        """Late-join: node just became ready while a track is playing."""
-        for _ in range(25):  # allow up to ~5 s for the join burst to converge
+        """Late-join: node holds the track; bring it in once its clock is ready.
+
+        Waits up to CATCHUP_WAIT_S - long enough for a model with no prior to
+        reach `min_slope_span` and fit its own slope - polling `start_ready`
+        rather than mere existence of an estimate. Joining a beat late but in
+        time beats joining at once and as an echo."""
+        deadline = now() + CATCHUP_WAIT_S
+        while now() < deadline:
             p = self.playing
             if p is None or p.track.id != track_id or not node.connected:
                 return
-            if node.model.estimate() is not None:
+            if start_ready(node.model):
                 t_join = now() + CATCHUP_LEAD
                 catch = Playback(
                     track=p.track, t_start=t_join, seek_ms=p.position_ms(t_join)
@@ -1808,7 +1877,7 @@ class Conductor:
                 except (KeyError, ValueError):
                     pass
             if self.playing is not None and self.playing.track.id == tid:
-                asyncio.create_task(self._catchup(node, tid))
+                self._dispatch_catchup(node, tid)
         elif kind == "unloaded":
             # The node evicted a decoded buffer to stay inside its memory
             # budget. `node.loaded` is the conductor's only view of what a node

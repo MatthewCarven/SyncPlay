@@ -2057,3 +2057,50 @@ the script tag. The live conductor was not touched.
 **Needs one fleet reload to take effect** — after which the question is a glance
 instead of an inference, permanently. Rides with the two player fixes already
 waiting.
+
+## 2026-08-27 (cont.) — a start needs a clock worth committing to
+
+The last conductor-side item today's data pointed at. A track change broke the
+fleet once and then held perfectly through the next one, so a track change is
+not destructive in itself: it is a stress test that only a marginal model fails.
+The failing run had Mums-Tablet freshly reconnected with ~25 samples in a few
+seconds and a drift fit thrashing +16 → +2 ppm. It met the only bar that existed
+— *an estimate exists* — was committed to a start, and spent the next minute at
+mean +19 ms with peaks at +122 ms. Not because the start was mistimed, but
+because the estimate behind it was re-fitted out from under the servo with every
+ping. Before `min_slope_span` a model's anchor is a moving median and its slope
+is an assertion of zero.
+
+**The rule, kept pure: `start_ready(model)`.** No estimate → no. Window has
+fitted its own slope (`skew_fitted`: 30 s of span, enough samples) → yes.
+Otherwise only if the node carries a remembered crystal *and* has
+`MIN_JOIN_SAMPLES` (8) — the exception the whole remembered-skew feature exists
+for, since a window de-trended by a credible prior has a clean median after a
+few samples, and making it wait thirty seconds would throw that feature away.
+`forget_prior()` therefore also forgets the shortcut, which is pinned.
+
+**Where it bites, and what it costs.** `_send_play` refuses a node that is not
+ready; `_transport_play` collects those as *deferred*, toasts "clock still
+settling, will join automatically", and dispatches `_catchup` for each. The room
+never waits — it is the load gate's own bargain, applied to the clock instead of
+the buffer. `_catchup` now polls `start_ready` rather than mere existence, and
+waits up to `CATCHUP_WAIT_S` (35 s) instead of 5, because 5 s could never cover
+a young model reaching `min_slope_span`. One catch-up per node at a time
+(`_dispatch_catchup`), since a node can be deferred at a start *and* report
+`loaded`, and two concurrent catch-ups would both send play.
+
+The honest cost: a phone with no remembered crystal that joins mid-song is
+silent for up to ~30 s instead of joining after one ping. Today it joins at once
+and is wrong for the same 30 s — audible, and as an echo. Silent-then-right beats
+wrong-then-right for a speaker in a room; a returning device pays nothing. It is
+one constant if that judgement is wrong.
+
+A side effect worth naming: a node with *no estimate at all* at a start used to
+be skipped with only the "nobody" warning and no path back until it happened to
+re-report `loaded`. It now gets a catch-up task like any other deferred node.
+
+299 tests (11 new in `test_start_ready.py`). One existing assertion re-pointed:
+`test_guards` pinned the exact wording of the "could not start" toast, which now
+says "no node has a clock worth timing from yet" rather than "no clock estimate",
+because that branch is reachable when every ready node is merely *young*.
+Conductor only — **no fleet reload.**

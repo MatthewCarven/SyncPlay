@@ -6,6 +6,19 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] **A start needs a clock worth committing to** (2026-08-27) — the only bar
+  was that an estimate *existed*. A freshly reconnected tablet met it with ~25
+  samples, was committed to a start at a track change, and ran a minute at mean
+  +19 ms / peaks +122 ms: the estimate was re-fitted out from under the servo on
+  every ping. `start_ready(model)` is the rule, pure: no estimate → no; fitted
+  its own slope (`skew_fitted`) → yes; else only with a remembered crystal *and*
+  `MIN_JOIN_SAMPLES` (8) — the exception remembered skew exists for.
+  `_send_play` refuses, `_transport_play` defers those nodes with a toast and a
+  catch-up, `_catchup` polls `start_ready` for up to `CATCHUP_WAIT_S` (35 s,
+  was 5 — which could never cover `min_slope_span`), one catch-up per node.
+  **Cost stated plainly:** a phone with no remembered crystal joining mid-song
+  is silent up to ~30 s instead of joining at once as an echo. One constant if
+  that is the wrong call. 299 tests (11 new). No reload.
 - [x] **Two silences given a voice** (2026-08-23) — a start that could time no
   node at all only ever logged `"nobody"` while `self.playing` said otherwise;
   it now toasts and logs at warning (state deliberately left standing, so
@@ -470,7 +483,10 @@ the player audio path only when unavoidable, one commit per feature so
   - Shape: a fast phase to get *an* estimate quickly, then a spread phase
     (~250 ms spacing for a few seconds) so the window straddles several
     power-save cycles. Costs a couple of seconds of join latency.
-  - Pairs with gating `_catchup` on estimate *quality* rather than existence —
+  - ~~Pairs with gating `_catchup` on estimate *quality* rather than existence~~
+    — **done 2026-08-27** (`start_ready`; see Done). The note below is kept for
+    its numbers.
+  - Original: gating `_catchup` on estimate *quality* rather than existence —
     it currently proceeds as soon as `estimate() is not None`, i.e. after one
     surviving ping, though its `range(25)` loop is willing to wait 5 s.
     `n_used >= 8` would cost a late joiner about a second.

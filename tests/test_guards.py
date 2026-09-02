@@ -90,7 +90,7 @@ def test_a_play_that_times_nobody_toasts_instead_of_only_logging(c):
     play(c, track)
 
     assert c.toasts, "silent failure: nothing was said to the operator"
-    assert "no node has a clock estimate" in c.toasts[-1]
+    assert "no node has a clock" in c.toasts[-1]
     assert track.title in c.toasts[-1]
 
 
@@ -102,7 +102,7 @@ def test_a_normal_start_says_nothing_extra(c):
     play(c, track)
 
     assert c.playing is not None
-    assert not any("clock estimate" in t for t in c.toasts)
+    assert not any("has a clock" in t for t in c.toasts)
 
 
 def test_the_no_load_path_still_owns_its_own_message(c):
