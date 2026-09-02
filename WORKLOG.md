@@ -2104,3 +2104,45 @@ re-report `loaded`. It now gets a catch-up task like any other deferred node.
 says "no node has a clock worth timing from yet" rather than "no clock estimate",
 because that branch is reachable when every ready node is merely *young*.
 Conductor only — **no fleet reload.**
+
+## 2026-09-02 (cont.) — a planning pass, and a telemetry ladder
+
+Matthew asked where we were and whether the plan still held. Rebuilt the
+picture from git rather than from memory, which turned up the first finding:
+the last three sessions' entries above were all labelled 2026-08-27, and git
+says 08-27, 08-31 and 09-02 — a "today" had been carried across sessions.
+Corrected in `fde4a46`, with a note in SYNC_ENGINE_PLAN that its step 2 landed
+on its own as `start_ready`, and the mesh-retry candidate moved from session
+memory into the TODO.
+
+The live conductor was not running, so the owed restart is free — the next
+start runs current code — and the owed page reloads now have the ⟳ column to
+check them. One thing to expect at bring-up: `Id10terror-phone` and
+`Mums-Tablet` carry no remembered crystal after their saturated entries were
+refused, so a play within ~30 s of their join defers them with a toast and a
+catch-up. That is the gate working, not a fault.
+
+**What the fortnight taught, condensed.** The timing core is not the
+bottleneck: 0.46 ms across four nodes through a 503 s run, and every failure
+heard was at a transition, all four now fixed. The old tablet is a device
+limit, closed. The estimator-swap plan lost its motivation when its own step 2
+landed for a different reason. The acoustic half of the roadmap still rests on
+a chirp that has never crossed air.
+
+**Order agreed:** bring-up evening (reload, ⟳, watch the defer and catch-up; a
+read-only capture and a two-observer check of the mesh mystery) → first
+hardware chirp on the conductor box → auto-nudge step 4 → absent mesh pairs get
+a reason → party-mode upload. Parked: `filter_best` retune, dashboard extras,
+HTTPS, the integral term, the sync-engine swap.
+
+**Then a new ask: "beef up telemetry a little" — for feedback and status
+messages, debug, and datalogging.** Surveyed what exists: one toast slot that
+forgets after 3.5 s, a console log that dies with its window, capture scripts
+that died with the session, and a node that never says what it is or why it
+restarted. Written up as [TELEMETRY_PLAN.md](TELEMETRY_PLAN.md): three separate
+slices — an event ring and EVENTS card (no reload); a JSONL trace on by default
+plus `tools/trace_report.py` (no reload); device facts, start causes,
+suspend/visibility events and a `notice` on the node's activity bar (reload,
+after the bring-up). Two rules run through it: no new traffic on the tablets'
+radios, and a diagnostic must never be the reason nobody can play. Plan only —
+nothing built; Matthew wanted the plan first.

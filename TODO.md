@@ -176,6 +176,25 @@ the player audio path only when unavoidable, one commit per feature so
 
 ## Next candidates
 
+- [ ] **Telemetry ladder — events, trace, device facts** (planned 2026-09-02,
+      nothing built; three separate slices)
+  - Full plan in [TELEMETRY_PLAN.md](TELEMETRY_PLAN.md). Slice 1: an `event()`
+    helper, a bounded ring and an EVENTS card on control — the toasts stop
+    forgetting, the catch-up deadline gets a voice, restarts get counted. No
+    reload. Slice 2: a JSONL trace on by default (`--no-trace`): events,
+    steerAcks, 10 s node and mesh lines, opt-in raw samples, and
+    `tools/trace_report.py` — the capture tables, promoted to a tool. No
+    reload. Slice 3: `hello` carries sampleRate/latencies and the servo
+    constants, every source start carries its cause, `ctxState`/`visibility`
+    events, a `notice` on a deferred node's activity bar. Needs a reload —
+    after the bring-up, riding with the next one.
+  - Two rules: no new node→conductor traffic beyond rare events; a diagnostic
+    must never be the reason nobody can play.
+  - Subsumes "a trace that outlives the process" and the dashboard's
+    latency/sample-rate rows below; the sparkline becomes a read of the trace;
+    the samples tier lets the `filter_best` re-tune be argued by replaying real
+    pongs instead of by a live experiment.
+
 - [ ] **Closed-loop room correction (needs the HTTPS story first)**
   - Now that per-node output EQ exists (manual), the payoff is automating it:
     mic-capture each node's actual acoustic response (chirp/sweep), compute the
@@ -456,6 +475,10 @@ the player audio path only when unavoidable, one commit per feature so
       **Needs one reload to take effect**, after which it answers itself.
 
 - [ ] **Follow-ups to the err-reading slice** (2026-08-27, all optional)
+  - **2026-09-02:** the trace and the device facts now have a plan - see
+    TELEMETRY_PLAN.md (slice 2 is the trace; slice 3 carries the latency /
+    sample-rate rows and a restart cause). The sparkline stays parked and
+    becomes a read of the trace.
   - **A trace that outlives the process.** The shipped fields answer "what is it
     doing now"; they cannot answer "is this the same thing we saw in July",
     which is the question actually being asked. A ~10-line JSONL sidecar per
@@ -542,6 +565,8 @@ the player audio path only when unavoidable, one commit per feature so
     should be argued in ± ms, and `test_trust.py` already pins the relationship.
 
 - [ ] **More timing info on the dashboard** (cheap → fancy)
+  - 2026-09-02: the first two rows are slice 3 of TELEMETRY_PLAN.md; the
+    sparkline is a read of slice 2's trace.
   - per-node `outputLatency`/`baseLatency` + sample rate (explains *why* a
     node needs the nudge it needs)
   - err-ms sparkline per node (servo behavior over the last minute)
