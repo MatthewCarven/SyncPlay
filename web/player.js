@@ -155,6 +155,10 @@ function connect() {
       name: localStorage.getItem("syncplay.name"),
       ua: navigator.userAgent.slice(0, 110),
       mesh: typeof RTCPeerConnection !== "undefined",
+      // Stamped into this page by the conductor when it was served, so it
+      // identifies the player.js actually running here — and keeps doing so
+      // across a WebSocket reconnect, because the page did not reload.
+      build: (typeof window !== "undefined" && window.PLAYER_BUILD) || null,
     }));
   };
 

@@ -101,6 +101,8 @@
   /* A reading that has expired, and one whose disturbance has no owner. */
   td.errStale { color: var(--dim); font-style: italic; }
   td.errOdd { color: var(--warn); }
+  /* A node running older player.js than the conductor is serving. */
+  .staleBuild { color: var(--warn); cursor: help; }
   button.forget {
     font: inherit; font-size: .7rem; line-height: 1; padding: 1px 4px;
     color: var(--dim); background: none; border: 1px solid var(--edge);

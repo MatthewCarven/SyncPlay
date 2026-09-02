@@ -184,6 +184,23 @@ function skewCellFor(n) {
 // rate playback is slipping at — and the node's own rate trim measures that
 // rate directly. Subtract the drift the conductor already knows about and what
 // remains is the node's audio clock against its own CPU clock.
+// A node is only running the code you think it is if it says so. The conductor
+// stamps the hash of the player.js it serves into each page it serves, and the
+// node echoes it back — so this compares what a node LOADED against what is
+// being served now. A WebSocket reconnect does not change the answer, because
+// the page did not reload, which is exactly the case that used to look fresh.
+function staleBuildFor(n) {
+  const serving = snap.servingBuild;
+  if (!serving || n.playerBuild === serving) return "";
+  const tip = n.playerBuild
+    ? [`running player build ${n.playerBuild}, but ${serving} is being served.`,
+       "This node has not reloaded since player.js changed - it is running",
+       "older code than everything else in the room."].join("\n")
+    : ["this page is too old to say which build it is running.",
+       "Reload it: anything before the build stamp existed is stale by definition."].join("\n");
+  return ` <span class="staleBuild" title="${esc(tip)}">⟳</span>`;
+}
+
 function errCellFor(n, err) {
   if (!n.playing) return `<td class="num">${err}</td>`;
   if (n.errStale) {
@@ -229,7 +246,7 @@ function renderNodeTable() {
                 : (n.loadedCurrent ? "ready" : (n.connected ? "idle" : "gone"));
     const err = n.playing ? fmt(n.syncErrMs, 1) : "—";
     return `<tr data-node="${esc(n.id)}">
-      <td><span class="dot ${n.connected ? "ok" : ""}"></span>${esc(n.name)}</td>
+      <td><span class="dot ${n.connected ? "ok" : ""}"></span>${esc(n.name)}${staleBuildFor(n)}</td>
       <td class="num">${fmt(n.offsetMs, 2)}</td>
       ${trustCellFor(n)}
       <td class="num">${fmt(n.bestRttMs, 1)}</td>

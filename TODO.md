@@ -419,21 +419,13 @@ the player audio path only when unavoidable, one commit per feature so
       long it has been outside `SLEW_LIMIT_S` (24 ms) and re-anchors after
       `SLEW_PATIENCE_S` (10 s) only if it *stays* out. **Needs the fleet reload.**
 
-- [ ] **No way to tell which `player.js` a node is running** (2026-08-27)
-  - "Needs a fleet reload" has been a standing note in the worklog for a month,
-    and there is still no way to answer "did it actually reload?". Today's
-    post-reload capture could confirm the *conductor* was on new code (the new
-    snapshot fields were present) but not the *players* — both new player paths
-    only become visible when something goes wrong, and nothing did.
-  - Shape: a build string the player sends in `hello` (a constant bumped by
-    hand, or the mtime/hash of `player.js` served to it), stored on the `Node`,
-    shown per-row on the control page, and flagged when it differs from what the
-    conductor is currently serving. That last part is the useful half — it turns
-    a half-reloaded fleet from an invisible state into an obvious one.
-  - Cheap, additive, revertible, and it needs one reload to take effect. After
-    that the question is a glance instead of an inference.
-  - Would have saved real time today, and it is the sort of thing that only ever
-    gets built after it has been missed a few times.
+- [x] ~~**No way to tell which `player.js` a node is running**~~ — **built
+      2026-08-27.** The conductor hashes the `player.js` it serves and stamps it
+      into each page (`window.PLAYER_BUILD`); the player echoes it in `hello`;
+      the control page marks a mismatch with ⟳ beside the node name and
+      `note_build()` logs it. No constant to bump, and the stamp rides on the
+      *page* so a bare WebSocket reconnect cannot launder a stale node.
+      **Needs one reload to take effect**, after which it answers itself.
 
 - [ ] **Follow-ups to the err-reading slice** (2026-08-27, all optional)
   - **A trace that outlives the process.** The shipped fields answer "what is it

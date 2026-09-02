@@ -32,6 +32,11 @@ log = logging.getLogger("syncplay")
 AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".oga", ".opus", ".webm"}
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 STATE_FILE = Path("syncplay_state.json")  # per-node nudge persistence (cwd)
+# The exact tag in player.html that the build stamp is injected in front of.
+# If this ever stops matching, the page still serves — it just stops being able
+# to say which build it is, which is why the mismatch is logged rather than
+# raised.
+PLAYER_SCRIPT_TAG = '<script src="/static/player.js"></script>'
 
 # --- scheduling constants (seconds) ----------------------------------------
 PLAY_LEAD = 1.8           # how far in the future a play command is dated
@@ -479,6 +484,10 @@ class Node:
         self.ping_boost = 1.0  # live cadence multiplier, for the control page
         self.kick = asyncio.Event()
         self.ping_task: Optional[asyncio.Task] = None
+        # Which build of player.js this node loaded; None until it says hello,
+        # and None forever from a page too old to carry the stamp — which is
+        # itself the answer to "has this one reloaded?".
+        self.build: Optional[str] = None
 
     def begin_session(self, ws: web.WebSocketResponse, ua: str) -> None:
         self.ws = ws
@@ -498,6 +507,10 @@ class Node:
         self.reset_err_stats()
         self.burst_until = 0.0
         self.mic = False  # mic mode is per page-life; the client re-announces it
+        # The build stamped into the page this node actually loaded. Survives a
+        # WebSocket reconnect, because the page did — which is the case a
+        # connect-time check would wrongly call fresh.
+        self.build: Optional[str] = None
 
     def remember_skew(self) -> bool:
         """Carry this session's measured drift forward. Returns what was learned.
@@ -739,6 +752,9 @@ class Node:
             "distSdPpm": self.dist_sd_ppm,
             "distN": self.dist_n,
             "audioClockCredible": self.audio_clock_credible(),
+            # Which build of player.js this node actually loaded. `None` from a
+            # page too old to report one, which is itself the answer.
+            "playerBuild": self.build,
         }
         if est is not None:
             d.update(
@@ -763,6 +779,8 @@ class Conductor:
         self.tracks: List[Track] = []
         self.tracks_by_id: Dict[str, Track] = {}
         self.nodes: Dict[str, Node] = {}
+        self._build: Optional[str] = None
+        self._build_key: Optional[Tuple[int, int]] = None
         self.control_sockets: Set[web.WebSocketResponse] = set()
         self.playing: Optional[Playback] = None
         self.paused: Optional[Playback] = None  # t_start meaningless; seek_ms is the position
@@ -1014,6 +1032,11 @@ class Conductor:
             "musicDir": str(self.music_dir),
             "nodes": [n.stats(current) for n in self.nodes.values()],
             "mesh": self._mesh_snapshot(),
+            # What the conductor would serve a page right now. The control page
+            # compares each node's `playerBuild` against this: equal is fresh,
+            # different is a node that has not reloaded, null is a page too old
+            # to say. A half-reloaded fleet used to be invisible.
+            "servingBuild": self.player_build(),
         }
 
     def _mesh_snapshot(self) -> List[dict]:
@@ -1646,6 +1669,8 @@ class Conductor:
 
         name = str(hello.get("name") or f"node-{client_id[:4]}")[:32]
         supports_mesh = bool(hello.get("mesh"))
+        build = hello.get("build")
+        build = None if build is None else str(build)[:32]
         node = self.nodes.get(client_id)
         if node is None:
             node = Node(client_id, name)
@@ -1661,6 +1686,8 @@ class Conductor:
             node.end_session()
         node.begin_session(ws, str(hello.get("ua", ""))[:120])
         node.mesh = supports_mesh
+        node.build = build
+        self.note_build(node)
         self._drop_mesh_pairs_for(node.client_id)  # stale pairs from a past life
         # Tail slice: date-based fallback ids all share the same *head*.
         log.info(
@@ -2117,8 +2144,67 @@ class Conductor:
 
     # --- http handlers -------------------------------------------------------------
 
-    async def handle_player_page(self, _req: web.Request) -> web.FileResponse:
-        return web.FileResponse(WEB_DIR / "player.html")
+    def note_build(self, node: Node) -> bool:
+        """Is this node running something other than what we are serving?
+
+        Returns True when it is, and says so in the log — the control page marks
+        it too, but the log is what you still have an hour later. Silent when
+        the node reports no build at all: that is a page served before the stamp
+        existed, and there is nothing to compare it against.
+        """
+        serving = self.player_build()
+        if not node.build or not serving or node.build == serving:
+            return False
+        log.warning(
+            "%s is running player build %s while %s is being served - it has "
+            "not reloaded since player.js changed",
+            node.name, node.build, serving,
+        )
+        return True
+
+    def player_build(self) -> Optional[str]:
+        """Short hash of the `player.js` this conductor is currently serving.
+
+        Deliberately not a constant anyone has to remember to bump: a build
+        marker that depends on discipline reports "up to date" precisely when
+        someone forgot, which is the moment it was needed. Recomputed whenever
+        the file's mtime or size moves, so editing `player.js` is enough.
+        """
+        try:
+            st = (WEB_DIR / "player.js").stat()
+        except OSError:
+            return None
+        key = (st.st_mtime_ns, st.st_size)
+        if self._build_key != key:
+            try:
+                data = (WEB_DIR / "player.js").read_bytes()
+            except OSError:
+                return None
+            self._build_key = key
+            self._build = hashlib.sha256(data).hexdigest()[:8]
+        return self._build
+
+    async def handle_player_page(self, _req: web.Request) -> web.StreamResponse:
+        """Serve player.html with the current build stamped into it.
+
+        The stamp rides on the *page*, not on the script, so a node that merely
+        reconnects its WebSocket keeps reporting the build it actually loaded —
+        which is the whole point. A check based on connection time would call
+        that node fresh, and it is exactly the node that is not.
+        """
+        build = self.player_build()
+        try:
+            html = (WEB_DIR / "player.html").read_text(encoding="utf-8")
+        except OSError:
+            return web.FileResponse(WEB_DIR / "player.html")
+        if build and PLAYER_SCRIPT_TAG in html:
+            html = html.replace(
+                PLAYER_SCRIPT_TAG,
+                f'<script>window.PLAYER_BUILD={json.dumps(build)};</script>'
+                + PLAYER_SCRIPT_TAG,
+                1,
+            )
+        return web.Response(text=html, content_type="text/html")
 
     async def handle_control_page(self, _req: web.Request) -> web.FileResponse:
         return web.FileResponse(WEB_DIR / "control.html")

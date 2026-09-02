@@ -2013,3 +2013,47 @@ whether one happened. Logged as a TODO — a build string in the player's `hello
 surfaced per-node on the control page, turns the question from an inference into
 a glance. It would need one reload to take effect, after which it never needs
 asking again.
+
+## 2026-08-27 (cont.) — which player.js is that node actually running?
+
+The gap the last capture exposed: `distSdPpm` in the payload proved the
+*conductor* was on new code, and nothing proved the *players* were, because both
+new player paths only become visible when something goes wrong and nothing did.
+"Needs a fleet reload" has been a standing note in this file for a month with no
+way to check whether one happened.
+
+**Two design choices, both about avoiding a marker that lies.**
+
+*No hand-bumped constant.* A build string someone has to remember to update
+reports "up to date" exactly when they forgot, which is the one moment it
+mattered. The conductor hashes the `player.js` it is serving — `sha256[:8]`,
+recomputed whenever mtime or size moves — so editing the file is the entire
+ritual.
+
+*The stamp rides on the page, not on the connection.* `handle_player_page` now
+reads `player.html` and injects `<script>window.PLAYER_BUILD="…"</script>` ahead
+of the script tag; the player echoes it in `hello`. A node that drops its
+WebSocket and reconnects therefore keeps reporting the build it *loaded* — which
+is the whole point, because a check keyed to connection time would call that node
+fresh at precisely the moment it is not. That was the first design I tried and
+discarded.
+
+The control page marks a mismatched node with ⟳ beside its name, tooltipped with
+both builds; a node reporting no build at all is marked differently, since a page
+served before the stamp existed is stale by definition. `note_build()` logs it
+too — the page shows you now, the log is what you still have an hour later. It is
+deliberately silent on a node that reports nothing, or a warning would fire on
+every hello from every old client.
+
+Failure is contained: a `player.html` missing the expected tag still serves,
+unstamped. The stamp is a diagnostic and must never be the reason nobody can
+play.
+
+288 tests (9 new in `test_build_stamp.py`), and verified end-to-end over real
+HTTP against a throwaway conductor on port 8999: the served page carries
+`window.PLAYER_BUILD="0e0df457"`, matching `sha256(web/player.js)[:8]`, ahead of
+the script tag. The live conductor was not touched.
+
+**Needs one fleet reload to take effect** — after which the question is a glance
+instead of an inference, permanently. Rides with the two player fixes already
+waiting.
