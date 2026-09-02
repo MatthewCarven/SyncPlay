@@ -1728,7 +1728,7 @@ channel died are all rendered identically — as no row at all. The mesh's entir
 job is to be the independent referee, and it can vanish without saying so. On a
 phone hotspot that is not a rare corner: it is Tuesday.
 
-## 2026-08-27 (cont.) — five nodes playing, and the answer was in the TODO all along
+## 2026-08-31 — five nodes playing, and the answer was in the TODO all along
 
 Matthew put five devices up on the **local network** (not the hotspot) and played
 a track: laptop, pc, phone, the old `Id10terror-tablet` and the borrowed
@@ -1794,7 +1794,7 @@ well-behaved nodes; it simply never applied to this one, because a node whose
 reference is moving has no steady state to droop to. Context Matthew supplied
 that fits: the device is **Android 6** with memory problems, and it drops out.
 
-**The hole that exposed in this morning's commit, now closed.** `audioClockPpm`
+**The hole that exposed in the 2026-08-27 commit (`d0676db`), now closed.** `audioClockPpm`
 gated on *fresh* and *settled* but not on *steady*, so a node swinging +/-6 ms
 sailed through and got a confident-looking attribution made of noise. It now
 keeps Welford accumulators over the run for the disturbance `-(rate-1)*1e6`,
@@ -1818,7 +1818,7 @@ indistinguishable again. And a track change put the pc at **err -28.81 ms** at
 `runS 19` — a large, real transient that the settling gate correctly refuses to
 attribute, which is the first time that guard has visibly earned its place.
 
-## 2026-08-27 (cont.) — the instrument validates against itself, and the tablet is characterised
+## 2026-08-31 (cont.) — the instrument validates against itself, and the tablet is characterised
 
 Matthew restarted the conductor, which put today's commits into the running
 process for the first time, and gave the fleet a clean 240 s window. Two
@@ -1881,7 +1881,7 @@ actual failure rather than one of its causes.
 Fleet at the end: **0.46 ms spread = 0.16 m of air**, 10/10 mesh pairs, worst
 closure 1.62 ms (on the n=9 pair; the n=114 pair reads -0.04).
 
-## 2026-08-27 (cont.) — a refused start no longer kills the node
+## 2026-08-31 (cont.) — a refused start no longer kills the node
 
 Found by reading, not by watching, while the hypothesis panel mapped the servo
 path — and then Matthew lost `Mums-Tablet` **at a track change**, which is
@@ -1923,7 +1923,7 @@ Eight checks. 279 Python tests (2 new in `test_guards.py`).
 
 **Needs a fleet reload** — `player.js`. Rides with the reload already owed.
 
-## 2026-08-27 (cont.) — closing the slew dead zone
+## 2026-08-31 (cont.) — closing the slew dead zone
 
 Second half of the reload-owed work, and it comes straight out of what Matthew
 heard today rather than out of reading.
@@ -1969,7 +1969,7 @@ A harness that reimplements the thing it is testing is testing its own copy.
 279 Python tests unchanged. **Needs a fleet reload** — rides with the refused-start
 fix in `5e7cc2d`.
 
-## 2026-08-27 (cont.) — post-reload capture, and what it could not prove
+## 2026-09-02 — post-reload capture, and what it could not prove
 
 240 s across four nodes (Mums-Tablet was simply not connected this run — not a
 dropout), spanning a track change at t=171 s.
@@ -2014,7 +2014,7 @@ surfaced per-node on the control page, turns the question from an inference into
 a glance. It would need one reload to take effect, after which it never needs
 asking again.
 
-## 2026-08-27 (cont.) — which player.js is that node actually running?
+## 2026-09-02 (cont.) — which player.js is that node actually running?
 
 The gap the last capture exposed: `distSdPpm` in the payload proved the
 *conductor* was on new code, and nothing proved the *players* were, because both
@@ -2058,7 +2058,7 @@ the script tag. The live conductor was not touched.
 instead of an inference, permanently. Rides with the two player fixes already
 waiting.
 
-## 2026-08-27 (cont.) — a start needs a clock worth committing to
+## 2026-09-02 (cont.) — a start needs a clock worth committing to
 
 The last conductor-side item today's data pointed at. A track change broke the
 fleet once and then held perfectly through the next one, so a track change is

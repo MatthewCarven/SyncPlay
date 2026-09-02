@@ -6,7 +6,7 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
-- [x] **A start needs a clock worth committing to** (2026-08-27) — the only bar
+- [x] **A start needs a clock worth committing to** (2026-09-02) — the only bar
   was that an estimate *existed*. A freshly reconnected tablet met it with ~25
   samples, was committed to a start at a track change, and ran a minute at mean
   +19 ms / peaks +122 ms: the estimate was re-fitted out from under the servo on
@@ -305,6 +305,21 @@ the player audio path only when unavoidable, one commit per feature so
   - Wants a party-relevant note in the UI, because this is exactly the failure a
     room full of guest phones will produce.
 
+- [ ] **Retry a mesh pair that fails to form, or dies** (2026-09-02; needs
+      `player.js`, so it rides with the next fleet reload)
+  - `player.js` builds each pair as `new RTCPeerConnection({iceServers: []})`
+    and handles only `onicecandidate`: no `connectionstatechange`, no
+    `restartIce`, no teardown-and-re-signal. So a pair whose ICE fails, or whose
+    channel dies after forming, is gone for the rest of the page life - the
+    conductor reaps it from `mesh_seen` after 90 s and nothing ever tries again.
+  - Shape: on `failed` (or `disconnected` for more than a few seconds) close the
+    pair and ask the conductor to re-signal it - `_push_mesh_roster` already
+    knows who should pair with whom. Bounded retries with backoff, so a
+    genuinely unreachable pair (the hotspot case below) does not spin forever.
+  - Pairs with the absent-pair item above: "no channel" should also say how
+    many times it was tried. Diagnostics only - the star path and the servo
+    never see the mesh - but it is a `player.js` change, so it needs a reload
+    and should ride with one that is already owed.
 - [ ] **Two control sockets disagreed about the mesh** (2026-08-27, unexplained)
   - A long-lived observer sampling every 15 s reported 2 mesh pairs for its whole
     300 s run; two short-lived queries in the same window reported 0. A later
@@ -418,13 +433,13 @@ the player audio path only when unavoidable, one commit per feature so
     `ctx.baseLatency` — the dashboard wishlist wants all three anyway, and they
     say whether the deep-buffer/offload path is in play.
 
-- [x] ~~**`onSteer` can dereference a nulled `current`**~~ — **fixed 2026-08-27**
+- [x] ~~**`onSteer` can dereference a nulled `current`**~~ — **fixed 2026-08-31**
       (`5e7cc2d`). `startSource` now refuses *before* `stopCurrent()`, returns a
       boolean, and sends `startRefused`; the conductor logs and toasts it. Guard
       written `!(seekS < buf.duration)` so a NaN seek is refused too. Verified
       old-vs-new in `tools/reanchor_harness.js`. **Needs the fleet reload.**
 
-- [x] ~~**The slew dead zone**~~ — **fixed 2026-08-27** (`99e1789`). Between the
+- [x] ~~**The slew dead zone**~~ — **fixed 2026-08-31** (`99e1789`). Between the
       servo's 12 ms saturation point and `REANCHOR_S` (200 ms) nothing could be
       corrected in useful time; a live node at +122 ms faced 152 s of echo.
       Lowering `REANCHOR_S` was not an option because the Android 6 tablet
@@ -433,7 +448,7 @@ the player audio path only when unavoidable, one commit per feature so
       `SLEW_PATIENCE_S` (10 s) only if it *stays* out. **Needs the fleet reload.**
 
 - [x] ~~**No way to tell which `player.js` a node is running**~~ — **built
-      2026-08-27.** The conductor hashes the `player.js` it serves and stamps it
+      2026-09-02.** The conductor hashes the `player.js` it serves and stamps it
       into each page (`window.PLAYER_BUILD`); the player echoes it in `hello`;
       the control page marks a mismatch with ⟳ beside the node name and
       `note_build()` logs it. No constant to bump, and the stamp rides on the
@@ -484,7 +499,7 @@ the player audio path only when unavoidable, one commit per feature so
     (~250 ms spacing for a few seconds) so the window straddles several
     power-save cycles. Costs a couple of seconds of join latency.
   - ~~Pairs with gating `_catchup` on estimate *quality* rather than existence~~
-    — **done 2026-08-27** (`start_ready`; see Done). The note below is kept for
+    — **done 2026-09-02** (`start_ready`; see Done). The note below is kept for
     its numbers.
   - Original: gating `_catchup` on estimate *quality* rather than existence —
     it currently proceeds as soon as `estimate() is not None`, i.e. after one

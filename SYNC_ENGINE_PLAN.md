@@ -1,6 +1,8 @@
 # Scoping — a swappable sync engine
 
-Status: **scoped, nothing built.** The question was "is this even possible?"
+Status: **scoped, nothing built** — but read on: step 2 of the ladder below (gate starts on estimate quality, reused by `_catchup`) landed on its own as `start_ready` on 2026-09-02, and all three pre-existing bugs listed at the end were fixed on 2026-08-23. Steps 1 and 3–5 remain unbuilt.
+
+The question was "is this even possible?"
 Short answer: yes, and the conductor side is much cheaper than it looks — but
 only if the boundary is drawn *above the wire*. Drawn below it, the cost roughly
 triples and "switch when stopped" quietly becomes "switch and everyone
