@@ -1968,3 +1968,48 @@ A harness that reimplements the thing it is testing is testing its own copy.
 
 279 Python tests unchanged. **Needs a fleet reload** — rides with the refused-start
 fix in `5e7cc2d`.
+
+## 2026-08-27 (cont.) — post-reload capture, and what it could not prove
+
+240 s across four nodes (Mums-Tablet was simply not connected this run — not a
+dropout), spanning a track change at t=171 s.
+
+    node                   n  mean ms   sd ms  cross | cond ppm  sd ppm  verdict
+    ID10TError-Laptop1   116    -0.00    0.04     61 |      -1        3  not credible
+    ID10TError-pc        116    +0.45    0.09      0 |      +4        9  CREDIBLE
+    Id10terror-phone     116    +0.00    0.68     63 |     -21       47  not credible
+    Id10terror-tablet    116    +0.07    4.95     63 |     -19      269  not credible
+
+    fleet spread 0.46 ms = 0.16 m     all 6 possible pairs, worst closure 0.79 ms
+
+**The dead-zone fix behaved correctly by doing nothing**, which is the result
+worth having. The tablet's worst excursion was 10.79 ms — under the 24 ms
+`SLEW_LIMIT_S`, so the patience timer never started and it was never restarted.
+That was the failure mode most worth fearing: a threshold low enough to catch a
+stranded node putting a swinging one into a restart loop. Across six captures
+the tablet has peaked at 10.8-12.3 ms, so 24 ms sits at roughly 2x its observed
+swing. The threshold is now justified against measurements rather than against
+my arithmetic.
+
+The only restarts were the four simultaneous ones at the track change, after a
+**503 s uninterrupted run**. No toasts, so the refused-start path never fired.
+
+**Two corrections to my own reporting.** The capture's "6/10 mesh" is a
+hardcoded denominator; with four nodes there are six possible pairs and all six
+were present. And the `ext +9` vs `cond +4` gap on the pc is not a disagreement
+between the two calculation paths — my external figure spans the whole 240 s
+including a track change, while the conductor's covers only the run since the
+restart. Different windows, same quantity.
+
+**What this capture could not prove, and it matters.** `distSdPpm` and
+`audioClockCredible` in the payload show the *conductor* is on today's code.
+Nothing here shows the *players* are. Both new player paths — `startRefused` and
+the slew patience timer — are only observable when something goes wrong, and
+nothing did. Absence of evidence, not evidence of absence.
+
+That is a standing gap rather than a one-off: "needs a fleet reload" has been a
+recurring note in this file for a month, and there has never been a way to check
+whether one happened. Logged as a TODO — a build string in the player's `hello`,
+surfaced per-node on the control page, turns the question from an inference into
+a glance. It would need one reload to take effect, after which it never needs
+asking again.
