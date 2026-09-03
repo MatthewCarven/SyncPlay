@@ -93,6 +93,13 @@ $("joinBtn").addEventListener("click", async () => {
 
   ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" });
   await ctx.resume(); // inside the gesture: unlocks audio on iOS/Android
+  // The context's own state as it changes. A phone that sleeps suspends it,
+  // and until now the conductor could only infer that from the re-anchor on
+  // wake. Rare - a few messages an evening - and one line each on the log.
+  ctx.onstatechange = () => {
+    send({ type: "ctxState", state: ctx.state });
+    logLine(`audio context ${ctx.state}`);
+  };
   master = ctx.createGain();
   master.gain.value = $("vol").value / 100;
   master.connect(ctx.destination);
@@ -136,7 +143,14 @@ async function requestWakeLock() {
   try { wakeLock = await navigator.wakeLock.request("screen"); } catch (_) {}
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && joined) {
+  const hidden = document.visibilityState !== "visible";
+  if (joined) {
+    // Say so. The screen going dark is the other half of the "phone slept"
+    // signal, and it costs one message a tablet sends a few times an evening.
+    send({ type: "visibility", hidden });
+    logLine(hidden ? "page hidden" : "page visible");
+  }
+  if (!hidden && joined) {
     requestWakeLock();
     if (ctx && ctx.state !== "running") ctx.resume();
   }
@@ -159,6 +173,14 @@ function connect() {
       // identifies the player.js actually running here — and keeps doing so
       // across a WebSocket reconnect, because the page did not reload.
       build: (typeof window !== "undefined" && window.PLAYER_BUILD) || null,
+      // What this device is. `ctx` exists here: JOIN creates it before
+      // connect() runs. null where the browser has no number to give.
+      sampleRate: ctx ? ctx.sampleRate : null,
+      baseLatencyMs: ctx && typeof ctx.baseLatency === "number" ? ctx.baseLatency * 1000 : null,
+      outputLatencyMs: ctx && typeof ctx.outputLatency === "number" ? ctx.outputLatency * 1000 : null,
+      // ...and which servo it runs, so a trace says what it was watching.
+      servo: { reanchorS: REANCHOR_S, slewLimitS: SLEW_LIMIT_S, slewPatienceS: SLEW_PATIENCE_S,
+               maxRateTrim: MAX_RATE_TRIM, steerHorizonS: STEER_HORIZON_S },
     }));
   };
 
@@ -235,6 +257,9 @@ function handle(msg, c1) {
     case "measureArm":
       onMeasureArm(msg);
       break;
+    case "notice":
+      onNotice(msg);
+      break;
     case "stats":
       $("stOffset").textContent = msg.offsetMs.toFixed(2);
       $("stRtt").textContent = msg.rttMs.toFixed(1);
@@ -296,6 +321,42 @@ function onPreload(msg) {
   loadTrack(tid, msg.url, ctl && ctl.signal);
 }
 
+// --- notices, and the page log ------------------------------------------------
+// A notice is one line from the conductor for this device's own screen. It
+// knows things this page cannot: that it was deferred and why, that its
+// catch-up is about to land, that it sat a track out. A notice wins the
+// activity bar while it is fresh and then gets out of the way. Text only,
+// through textContent - never markup.
+let notice = null;        // {text, until}
+let noticeTimer = null;
+
+function onNotice(msg) {
+  const text = String(msg.text || "").slice(0, 120);
+  const ttlMs = Math.max(1, Math.min(120, +msg.ttlS || 8)) * 1000;
+  if (noticeTimer !== null) { clearTimeout(noticeTimer); noticeTimer = null; }
+  notice = text ? { text, until: performance.now() + ttlMs } : null;
+  if (notice) {
+    noticeTimer = setTimeout(() => { notice = null; noticeTimer = null; renderActivity(); }, ttlMs);
+    logLine(`notice: ${text}`);
+  }
+  renderActivity();
+}
+
+// The last LOG_LINES things this device did that were not routine: starts and
+// why, notices, audio-context state, visibility, refusals, load errors. For
+// the device you are holding when it misbehaves at the far end of the house.
+const LOG_LINES = 40;
+const logLines = [];
+
+function logLine(text) {
+  const t = new Date();
+  const two = (n) => String(n).padStart(2, "0");
+  logLines.push(`${two(t.getHours())}:${two(t.getMinutes())}:${two(t.getSeconds())} ${text}`);
+  if (logLines.length > LOG_LINES) logLines.splice(0, logLines.length - LOG_LINES);
+  const el = $("log");
+  if (el) el.textContent = logLines.join("\n");
+}
+
 function renderActivity() {
   const curId = current && current.trackId;
   // A transfer for anything other than what's sounding is the prefetch of the
@@ -304,9 +365,14 @@ function renderActivity() {
   const decId = decoding.size ? [...decoding][0] : null;
   const busy = dlId ? "downloading" : (decId ? "decoding" : null);
   const pct = dlId && dlPct !== null ? `${dlPct}%` : "";
+  // A notice from the conductor wins while it is fresh - see onNotice.
+  const noted = notice !== null && performance.now() < notice.until;
 
   let text, cls;
-  if (armed) {
+  if (noted) {
+    text = notice.text;
+    cls = "note";
+  } else if (armed) {
     text = busy ? `arming · ${busy}` : "arming";
     cls = "busy";
   } else if (current) {
@@ -321,7 +387,7 @@ function renderActivity() {
     cls = "";
   }
   $("activityText").textContent = text;
-  $("activityPct").textContent = pct;
+  $("activityPct").textContent = noted ? "" : pct;
   $("activity").className = cls;
 }
 
@@ -348,6 +414,7 @@ async function loadTrack(trackId, url, signal) {
         if (err && err.name === "AbortError") return null;
         if (attempt >= LOAD_RETRIES) {
           send({ type: "loadError", trackId, error: String(err).slice(0, 120) });
+          logLine(`load failed: ${String(err).slice(0, 80)}`);
           return null;
         }
         await new Promise((r) => setTimeout(r, LOAD_RETRY_MS));
@@ -448,7 +515,17 @@ function posAt(ctxT) {
   return current.anchorPos + Math.max(0, ctxT - current.anchorCtx) * current.rate;
 }
 
-function startSource(buf, trackId, title, whenCtx, seekS) {
+// What a source start says about itself, for the state message and the log.
+function describeCause(c) {
+  if (!c) return "unknown";
+  let s = c.cause || "unknown";
+  if (c.reason) s += `, ${c.reason}`;
+  if (typeof c.errMs === "number") s += ` at ${c.errMs >= 0 ? "+" : ""}${c.errMs.toFixed(0)} ms`;
+  if (typeof c.lateMs === "number" && c.lateMs > 0) s += `, ${c.lateMs.toFixed(0)} ms late`;
+  return s;
+}
+
+function startSource(buf, trackId, title, whenCtx, seekS, cause) {
   // Refuse BEFORE tearing down what is playing. The old order called
   // stopCurrent() — which nulls `current` — and only then bailed on this
   // guard, so a refused start left the node silent with `current` null and
@@ -464,6 +541,7 @@ function startSource(buf, trackId, title, whenCtx, seekS) {
     send({ type: "startRefused", trackId,
            seekMs: Math.round(seekS * 1000),
            durationMs: Math.round(buf.duration * 1000) });
+    logLine("start refused: seek past the end of the buffer");
     return false;
   }
   stopCurrent();
@@ -484,7 +562,12 @@ function startSource(buf, trackId, title, whenCtx, seekS) {
     }
   };
   setNowPlaying(title || trackId);
-  send({ type: "state", playing: trackId });
+  // Why this source started: the `why` the play command carried, or the
+  // re-anchor rule that fired and the error that fired it. What the conductor
+  // used to see as "a source started" becomes a line that can be read.
+  const why = cause || { cause: "unknown" };
+  send({ type: "state", playing: trackId, ...why });
+  logLine(`start: ${describeCause(why)}`);
   return true;
 }
 
@@ -492,11 +575,27 @@ function startBuffer(buf, msg) {
   let when = perfToCtx(msg.atNodeMs + nudgeMs);
   let seekS = (msg.seekMs || 0) / 1000;
   const nowCtx = ctx.currentTime;
+  // The conductor's reason rides the play command. A start that arrives after
+  // its own target says how late: a decode that overran the lead is a number
+  // worth having, not a mystery.
+  const cause = { cause: typeof msg.why === "string" ? msg.why.slice(0, 16) : "play" };
   if (when < nowCtx + 0.02) { // target already passed → join at the right spot
+    cause.lateMs = ((nowCtx + 0.06) - when) * 1000;
     seekS += (nowCtx + 0.06) - when;
     when = nowCtx + 0.06;
   }
-  startSource(buf, msg.trackId, msg.title, when, seekS);
+  startSource(buf, msg.trackId, msg.title, when, seekS, cause);
+}
+
+// The constant perfToCtx is built on: performance time minus context time, in
+// ms, from the output-timestamp pair. Steady on a healthy device; a mapping
+// that steps is a device changing its mind about its own latency, which was
+// the one loose end of the tablet thread. One number, already computed.
+function mapMs() {
+  if (!ctx.getOutputTimestamp) return null;
+  const ts = ctx.getOutputTimestamp();
+  if (!ts || !(ts.contextTime > 0) || !(ts.performanceTime > 0)) return null;
+  return ts.performanceTime - ts.contextTime * 1000;
 }
 
 // v2 servo: the conductor says "at your local time L the song should be at P".
@@ -527,7 +626,13 @@ function onSteer(msg) {
     if (!buf) return;
     const nowCtx = ctx.currentTime;
     const seekS = msg.posMs / 1000 + (nowCtx + 0.08 - targetCtx);
-    startSource(buf, msg.trackId, current.title, nowCtx + 0.08, seekS);
+    startSource(buf, msg.trackId, current.title, nowCtx + 0.08, seekS, {
+      cause: "reanchor",
+      // Which rule fired: a fault is an error past REANCHOR_S outright, patience
+      // is a smaller one the servo was left slewing at for SLEW_PATIENCE_S.
+      reason: Math.abs(errS) > REANCHOR_S ? "fault" : "patience",
+      errMs: errS * 1000,
+    });
   } else {
     const nowCtx = ctx.currentTime;
     current.anchorPos = posAt(nowCtx); // re-anchor bookkeeping at the old rate
@@ -537,7 +642,7 @@ function onSteer(msg) {
     current.src.playbackRate.setValueAtTime(current.rate, nowCtx);
   }
   send({ type: "steerAck", trackId: msg.trackId,
-         errMs: errS * 1000, rate: current.rate });
+         errMs: errS * 1000, rate: current.rate, mapMs: mapMs() });
 }
 
 function onStop(msg) {

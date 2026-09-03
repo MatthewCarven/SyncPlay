@@ -2259,3 +2259,61 @@ nothing ever played, and said so with dashes rather than a crash.
 it is restarted — Matthew's call; from then on every evening is on disk.
 Slice 3 (device facts, causes, notices; needs the reload) goes after the
 bring-up as planned.
+
+## 2026-09-03 (cont.) — telemetry slice 3: the node says what it is, and why it restarted
+
+Matthew said continue and that he would reconnect the fleet afterwards for a
+data capture — so the reload that slice 3 needs was coming anyway, and the
+one open sequencing call answered itself: slice 3 went in the same day,
+before the bring-up rather than after.
+
+**The node speaks.** `hello` now carries `sampleRate`, `baseLatencyMs`,
+`outputLatencyMs` (null where the browser has no number) and the player's
+servo constants (`REANCHOR_S`, `SLEW_LIMIT_S`, `SLEW_PATIENCE_S`,
+`MAX_RATE_TRIM`, `STEER_HORIZON_S`), all clamped on receipt (`_clean_hz`,
+`_clean_latency_ms`, `_clean_servo`); they ride the join event and the trace,
+sit in `stats()`, and show in the node-name tooltip on control. Every
+`state` carries a cause: `Playback` gained `why` (play / resume / seek / next
+/ auto / catchup), the play command carries it, `startBuffer` echoes it and
+adds `lateMs` when the target had already passed, and the two re-anchor
+paths in `onSteer` report `cause: "reanchor"` with `reason: "fault"` (past
+`REANCHOR_S`) or `"patience"` (`SLEW_PATIENCE_S` ran out) and the `errMs`
+that fired. The conductor's `state` handler allow-lists all of it
+(`START_CAUSES`, `RESTART_REASONS`) and the event reads `source restarted
+(#2 this track): re-anchor, patience at +31 ms`; `last_start` sits in
+`stats()` for the err tooltip. `ctxState` (from `ctx.onstatechange`) and
+`visibility` (from the handler that already existed) are two rare messages,
+allow-listed; `ctx` is a warning unless running. `steerAck` carries `mapMs`
+— `performanceTime − contextTime·1000` from the output-timestamp pair — into
+`stats()` and the trace's `steer` lines: the tablet thread's one loose end,
+now a column. And `notice{text, ttlS}` goes conductor → one node: on defer
+("clock still settling - joining automatically", 40 s), on the catch-up play
+("joining now"), on the catch-up timeout, and to the mic during calibration;
+`renderActivity` shows it in amber while fresh (`textContent`, 120 chars,
+1–120 s) and then gets out of the way. A collapsed LOG on the player page
+keeps the last 40 non-routine lines (starts with cause, notices, context
+state, visibility, refusals, load errors) for the device in your hand.
+
+**Verified.** `node --check`; `tools/reanchor_harness.js` extended — the
+patience restart says patience at ~120 ms, the fault restart says fault at
+~400 ms, the swinging node reports no start at all, every steerAck carries
+`mapMs` — 20 checks; new `tools/activity_harness.js` runs the shipped
+`renderActivity` / `onNotice` / `logLine` against a stub DOM with its own
+clock and timers — a fresh notice beats idle, playing and arming, expires on
+its timer, an empty one cancels, ttl and length clamp, markup lands as text,
+the log caps at 40 — 17 checks; `tests/test_node_reports.py`, 17 tests, with
+hostile payloads throughout — 363 pass. The report tool now prints each
+restart's reason and error. Then live on a throwaway :8931 with the in-app
+browser running the new `player.js`: the join read `[44100 Hz, base 20.3 ms,
+out 0.0 ms]`, play one second after the join deferred the node, its own
+screen logged `notice: clock still settling - joining automatically`, the
+catch-up landed at 26.4 s as `source started (catchup)` with `notice: joining
+now`, restart-from-top read `source started (seek)` (a new Playback, so a
+start, not a restart — by design), the name tooltip showed the sample rate,
+latencies, servo constants and build, and the trace carried it all with a
+steady `mapMs` of 24117.6 ms across the acks.
+
+**The reload.** This is the slice that changes `player.js`: every node's
+page needs a reload after the conductor restart, and the ⟳ column says which
+have not. Old pages ignore `notice` and `why` and report no cause, which
+reads as `unknown` — a half-reloaded fleet is safe, just quieter.

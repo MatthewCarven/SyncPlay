@@ -38,6 +38,8 @@ function build(startSrc) {
   return new Function(`
     let current = null, nudgeMs = 0;
     const sent = [];
+    const $ = () => ({ textContent: "" });      // the page log, stubbed
+    const LOG_LINES = 40, logLines = [];
     const REANCHOR_S = 0.2, MAX_RATE_TRIM = 8e-4, STEER_HORIZON_S = 15;
     const SLEW_LIMIT_S = 2 * MAX_RATE_TRIM * STEER_HORIZON_S, SLEW_PATIENCE_S = 10;
     const eq = null, master = {};
@@ -50,6 +52,9 @@ function build(startSrc) {
     const cache = new Map();
     const send = (m) => sent.push(m);
     const setNowPlaying = () => {};
+    ${fn("logLine")}
+    ${fn("describeCause")}
+    ${fn("mapMs")}
     ${fn("perfToCtx")}
     ${fn("stopCurrent")}
     ${fn("posAt")}
@@ -169,6 +174,41 @@ function steerAt(h, errMs) {
   const before = h.current.src;
   steerAt(h, 400);                          // past REANCHOR_S
   check("400 ms restarts immediately, without waiting", h.current.src !== before);
+}
+
+
+// --- what each restart says about itself (telemetry slice 3) ---------------
+// The conductor used to see "a source started" and nothing else. Now the
+// patience path and the fault path each name themselves and carry the error
+// that fired them, and a swinging node - which never restarts - says nothing.
+function starts(h) { return h.sent.filter((m) => m.type === "state" && m.playing); }
+
+{
+  const h = build(fn("startSource"));
+  h.seed({ duration: 600.0 }, "trk", 100.0);
+  steerAt(h, 120); h.advance(4); steerAt(h, 120); h.advance(8); steerAt(h, 120);
+  const st = starts(h);
+  check("patience restart says cause reanchor, reason patience",
+        st.length === 1 && st[0].cause === "reanchor" && st[0].reason === "patience");
+  check("...and carries the error that fired it (~120 ms)",
+        st.length === 1 && Math.abs(st[0].errMs - 120) < 2);
+}
+{
+  const h = build(fn("startSource"));
+  h.seed({ duration: 600.0 }, "trk", 100.0);
+  steerAt(h, 400);
+  const st = starts(h);
+  check("fault restart says reason fault at ~400 ms",
+        st.length === 1 && st[0].reason === "fault" && Math.abs(st[0].errMs - 400) < 2);
+}
+{
+  const h = build(fn("startSource"));
+  h.seed({ duration: 600.0 }, "trk", 100.0);
+  for (let i = 0; i < 40; i++) { steerAt(h, i % 2 ? 12 : -12); h.advance(2); }
+  check("a swinging node reports no start at all", starts(h).length === 0);
+  const acks = h.sent.filter((m) => m.type === "steerAck");
+  check("every steerAck carries mapMs from the output-timestamp pair",
+        acks.length === 40 && acks.every((m) => typeof m.mapMs === "number"));
 }
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : "\nall checks passed");

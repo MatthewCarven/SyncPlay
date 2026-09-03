@@ -371,7 +371,8 @@ def planted_trace(path: Path) -> dict:
     line("event", 34, event="catchup", level="info", node="id-phone", name="phone",
          text='joined "song"', waitedS=29.4)
     line("event", 120, event="restart", level="warning", node="id-tablet", name="tablet",
-         text="source restarted (#1 this track)", restarts=1)
+         text="source restarted (#1 this track)", restarts=1, cause="reanchor",
+         reason="patience", errMs=31.0)
     line("event", 150, event="catchup-timeout", level="warning", node="id-phone", name="phone",
          text="could not join", waitedS=35.0)
     for k, cl in enumerate((0.2, 3.4, 1.0)):
@@ -406,7 +407,7 @@ def test_the_report_prints_the_planted_numbers(tmp_path):
     facts = R.node_facts(rows)
     assert facts["phone"]["survival"] == pytest.approx(12.0)
     assert facts["tablet"]["audioPpm"] == -100.0 and facts["tablet"]["audioCredible"] is True
-    assert "restarts: tablet 1 (20:17:00)" in text
+    assert "restarts: tablet 1 (20:17:00 patience +31 ms)" in text
     assert "catch-ups: 20:15:34 phone after 29.4 s" in text
     assert "catch-up TIMEOUTS: 20:17:30 phone" in text
     assert "20:15:05  defer: phone" in text

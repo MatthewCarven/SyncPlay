@@ -176,15 +176,15 @@ the player audio path only when unavoidable, one commit per feature so
 
 ## Next candidates
 
-- [ ] **Telemetry ladder — events, trace, device facts** (planned 2026-09-02;
-      slices 1 and 2 done 2026-09-03, slice 3 to go)
+- [x] **Telemetry ladder — events, trace, device facts** (planned 2026-09-02;
+      all three done 2026-09-03)
   - Full plan in [TELEMETRY_PLAN.md](TELEMETRY_PLAN.md). Slice 1 (done 2026-09-03): an `event()`
     helper, a bounded ring and an EVENTS card on control — the toasts stop
     forgetting, the catch-up deadline gets a voice, restarts get counted. No
     reload. Slice 2 (done 2026-09-03): a JSONL trace on by default (`--no-trace`): events,
     steerAcks, 10 s node and mesh lines, opt-in raw samples, and
     `tools/trace_report.py` — the capture tables, promoted to a tool. No
-    reload. Slice 3: `hello` carries sampleRate/latencies and the servo
+    reload. Slice 3 (done 2026-09-03): `hello` carries sampleRate/latencies and the servo
     constants, every source start carries its cause, `ctxState`/`visibility`
     events, a `notice` on a deferred node's activity bar. Needs a reload —
     after the bring-up, riding with the next one.
@@ -297,7 +297,7 @@ the player audio path only when unavoidable, one commit per feature so
     800 ppm cap — so it is not saturated, and something re-injects the error
     faster than the ~15 s it needs to null it. A coarsely-quantised output
     timestamp on an Android tablet has that shape.
-  - **Next test is no longer a stare.** Log the tablet's `C` (the `perfToCtx`
+  - **Next test is no longer a stare** (done 2026-09-03: `mapMs` rides every steerAck into `stats()` and the trace's `steer` lines; `trace_report.py --csv` shows whether it steps). Log the tablet's `C` (the `perfToCtx`
     mapping constant) per steer and see whether it steps. Pairs with the
     `outputLatency`/`baseLatency`/sample-rate readout and the err-ms sparkline
     already listed under "More timing info" — both would have shown this.
@@ -475,7 +475,7 @@ the player audio path only when unavoidable, one commit per feature so
       **Needs one reload to take effect**, after which it answers itself.
 
 - [ ] **Follow-ups to the err-reading slice** (2026-08-27, all optional)
-  - **2026-09-02:** the trace and the device facts now have a plan - see
+  - **2026-09-02:** the trace and the device facts now have a plan (all three slices built 2026-09-03) - see
     TELEMETRY_PLAN.md (slice 2 is the trace; slice 3 carries the latency /
     sample-rate rows and a restart cause). The sparkline stays parked and
     becomes a read of the trace.
@@ -567,7 +567,7 @@ the player audio path only when unavoidable, one commit per feature so
 - [ ] **More timing info on the dashboard** (cheap → fancy)
   - 2026-09-02: the first two rows are slice 3 of TELEMETRY_PLAN.md; the
     sparkline is a read of slice 2's trace.
-  - per-node `outputLatency`/`baseLatency` + sample rate (explains *why* a
+  - DONE 2026-09-03 (telemetry slice 3: node-name tooltip, join event, trace): per-node `outputLatency`/`baseLatency` + sample rate (explains *why* a
     node needs the nudge it needs)
   - err-ms sparkline per node (servo behavior over the last minute)
   - RTT p50/p95 per node (Wi-Fi quality at a glance; data already in the

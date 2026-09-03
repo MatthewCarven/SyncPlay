@@ -250,9 +250,16 @@ def report(rows: List[dict], source: str = "") -> str:
     # --- err ms per node
     stats = steer_stats(rows)
     facts = node_facts(rows)
+    # Each restart with its time and, once the node says (telemetry slice 3),
+    # which re-anchor rule fired and how far out it was.
     restarts_by: Dict[str, List[str]] = defaultdict(list)
     for r in events(rows, "restart"):
-        restarts_by[str(r.get("name") or r.get("node"))].append(_short_wall(r))
+        said = _short_wall(r)
+        if r.get("reason"):
+            said += f" {r['reason']}"
+        if r.get("errMs") is not None:
+            said += f" {_f(r.get('errMs'), '+.0f')} ms"
+        restarts_by[str(r.get("name") or r.get("node"))].append(said)
     out.append("ERR MS per node (steer lines)")
     out.append(
         f"{'node':<18}{'n':>6}{'mean':>9}{'sd':>8}{'min':>9}{'max':>9}"

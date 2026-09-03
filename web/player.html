@@ -65,6 +65,15 @@
   #activity.busy .lamp { background: var(--accent); animation: pulse 1.1s infinite; }
   #activity.play { color: var(--text); border-color: var(--accent); }
   #activity.play .lamp { background: var(--accent); }
+  /* a notice from the conductor: why this device is doing what it is doing */
+  #activity.note { color: var(--text); border-color: var(--warn); }
+  #activity.note .lamp { background: var(--warn); }
+  details.log { margin-top: 14px; color: var(--dim); font-size: .68rem; }
+  details.log summary { cursor: pointer; letter-spacing: .08em; }
+  details.log pre {
+    margin-top: 8px; white-space: pre-wrap; word-break: break-word;
+    max-height: 200px; overflow-y: auto; font: inherit;
+  }
   #activity .pct { margin-left: auto; font-variant-numeric: tabular-nums; }
   @keyframes pulse { 50% { opacity: .25; } }
   .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 16px; }
@@ -111,6 +120,7 @@
       <label class="vol">vol <input type="range" id="vol" min="0" max="100" value="80"></label>
       <button id="micBtn">🎙️ use as calibration mic</button>
       <div id="micStatus" class="hint" style="display:none"></div>
+      <details class="log"><summary>LOG</summary><pre id="log"></pre></details>
     </div>
   </div>
   <script src="/static/player.js"></script>

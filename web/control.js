@@ -216,7 +216,9 @@ function errCellFor(n, err) {
   }
   const lines = [];
   if (n.restarts) {
-    lines.push(`restarted ${n.restarts}× this track - each one is in EVENTS with its time`);
+    const last = lastStartText(n);
+    lines.push(`restarted ${n.restarts}× this track${last ? ` (last: ${last})` : ""}` +
+               ` - each one is in EVENTS with its time`);
   }
   if (n.ratePpm !== null && n.ratePpm !== undefined) {
     lines.push(`servo rate: ${n.ratePpm >= 0 ? "+" : ""}${n.ratePpm.toFixed(0)} ppm`);
@@ -237,6 +239,35 @@ function errCellFor(n, err) {
     lines.length ? ` title="${esc(lines.join("\n"))}"` : ""}>${err}</td>`;
 }
 
+// What this device is, on hover: the facts it sent with its hello (telemetry
+// slice 3). A page too old to say gets only its build line.
+function deviceTip(n) {
+  const lines = [];
+  if (n.sampleRate) lines.push(`sample rate ${n.sampleRate} Hz`);
+  if (n.baseLatencyMs != null || n.outputLatencyMs != null) {
+    lines.push(`latency: base ${fmt(n.baseLatencyMs, 1)} ms, output ${fmt(n.outputLatencyMs, 1)} ms`);
+  }
+  const s = n.servo || {};
+  if (s.reanchorS != null) {
+    lines.push(`servo: re-anchor past ${(s.reanchorS * 1000).toFixed(0)} ms, ` +
+               `slew limit ${fmt(s.slewLimitS * 1000, 0)} ms, patience ${fmt(s.slewPatienceS, 0)} s, ` +
+               `max trim ${fmt(s.maxRateTrim * 1e6, 0)} ppm, horizon ${fmt(s.steerHorizonS, 0)} s`);
+  }
+  lines.push(`player build ${n.playerBuild || "unknown - the page predates the stamp"}`);
+  if (n.ua) lines.push(n.ua);
+  return lines.join("\n");
+}
+
+// The cause of the last restart, for the err tooltip: which re-anchor rule
+// fired and how far out it was, in the node's own words.
+function lastStartText(n) {
+  const ls = n.lastStart;
+  if (!ls || !ls.cause) return "";
+  if (ls.cause !== "reanchor") return ls.cause;
+  const err = ls.errMs == null ? "" : ` at ${ls.errMs >= 0 ? "+" : ""}${ls.errMs.toFixed(0)} ms`;
+  return `re-anchor, ${ls.reason || "?"}${err}`;
+}
+
 function renderNodeTable() {
   const rows = snap.nodes.map((n) => {
     // Decode outranks download: loadPct sits at 100 for the whole decode, so
@@ -251,7 +282,7 @@ function renderNodeTable() {
                 : (n.loadedCurrent ? "ready" : (n.connected ? "idle" : "gone"));
     const err = n.playing ? fmt(n.syncErrMs, 1) : "—";
     return `<tr data-node="${esc(n.id)}">
-      <td><span class="dot ${n.connected ? "ok" : ""}"></span>${esc(n.name)}${staleBuildFor(n)}</td>
+      <td><span class="dot ${n.connected ? "ok" : ""}"></span><span class="nodeName" title="${esc(deviceTip(n))}">${esc(n.name)}</span>${staleBuildFor(n)}</td>
       <td class="num">${fmt(n.offsetMs, 2)}</td>
       ${trustCellFor(n)}
       <td class="num">${fmt(n.bestRttMs, 1)}</td>

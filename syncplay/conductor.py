@@ -141,6 +141,13 @@ EVENT_LEVELS = ("debug", "info", "warning")
 # The trace on disk (see trace.py) gets a `node` line per connected node and a
 # `mesh` line per pair this often. Events and steer acks go as they happen.
 TRACE_PERIOD_S = 10
+# What a node may say about itself (telemetry slice 3). A label off the wire
+# that is not one of these becomes "unknown" or nothing: a cause is a label,
+# and a label the code did not define is not one it can act on.
+START_CAUSES = ("play", "resume", "seek", "next", "auto", "catchup", "reanchor")
+RESTART_REASONS = ("fault", "patience")
+CTX_STATES = ("running", "suspended", "interrupted", "closed")
+SERVO_KEYS = ("reanchorS", "slewLimitS", "slewPatienceS", "maxRateTrim", "steerHorizonS")
 
 
 def now() -> float:
@@ -226,6 +233,55 @@ def _clean_skew(v) -> Optional[float]:
     if not math.isfinite(s) or abs(s) >= MAX_PERSISTED_SKEW:
         return None
     return s
+
+
+def _clean_hz(v) -> Optional[float]:
+    """A sample rate off the wire: 8 kHz to 384 kHz, or nothing."""
+    try:
+        hz = float(v)
+    except (TypeError, ValueError):
+        return None
+    return hz if math.isfinite(hz) and 8000.0 <= hz <= 384000.0 else None
+
+
+def _clean_latency_ms(v) -> Optional[float]:
+    """A reported audio latency in ms: zero to five seconds, or nothing."""
+    try:
+        ms = float(v)
+    except (TypeError, ValueError):
+        return None
+    return ms if math.isfinite(ms) and 0.0 <= ms <= 5000.0 else None
+
+
+def _clean_servo(v) -> Dict[str, float]:
+    """The player's servo constants: keys allow-listed, values finite and sane."""
+    out: Dict[str, float] = {}
+    if not isinstance(v, dict):
+        return out
+    for k in SERVO_KEYS:
+        try:
+            x = float(v.get(k))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(x) and 0.0 <= x <= 1000.0:
+            out[k] = x
+    return out
+
+
+def _clean_map_ms(v) -> Optional[float]:
+    """performanceTime - contextTime * 1000 from the node's output-timestamp
+    pair — the constant `perfToCtx` is built on. Any finite number is plausible
+    (it is roughly the page's age); bound it anyway, it is client data."""
+    try:
+        ms = float(v)
+    except (TypeError, ValueError):
+        return None
+    return ms if math.isfinite(ms) and abs(ms) <= 1e12 else None
+
+
+def _clean_choice(v, allowed: Tuple[str, ...], default: Optional[str]) -> Optional[str]:
+    """A label off the wire, kept only if it is one we defined."""
+    return v if isinstance(v, str) and v in allowed else default
 
 
 def ping_boost(n_used: int, n_samples: int) -> float:
@@ -473,6 +529,10 @@ class Playback:
     track: Track
     t_start: float  # conductor time the (possibly seeked) playback began
     seek_ms: float
+    # Why it was started: the `why` the play command carries, which the node
+    # echoes back as the cause of its source start. One of START_CAUSES;
+    # "catchup" only on the transient Playback `_catchup` builds for one node.
+    why: str = "play"
 
     def position_ms(self, t: Optional[float] = None) -> float:
         return self.seek_ms + ((t if t is not None else now()) - self.t_start) * 1000.0
@@ -553,6 +613,18 @@ class Node:
         # Why the last `remember_skew` declined to bank, in one line, for the
         # leave event. None when it banked, or had nothing to decide.
         self.bank_note: Optional[str] = None
+        # What the device said it is, with its hello (telemetry slice 3): the
+        # AudioContext's sample rate and latencies, and the player's own servo
+        # constants, so a trace says which servo it was watching. None / empty
+        # from a page too old to say.
+        self.sample_rate: Optional[float] = None
+        self.base_latency_ms: Optional[float] = None
+        self.output_latency_ms: Optional[float] = None
+        self.servo: Dict[str, float] = {}
+        # The cause the node gave for its last source start, and the servo's
+        # output-timestamp mapping from its last steerAck.
+        self.last_start: Optional[dict] = None
+        self.map_ms: Optional[float] = None
 
     def begin_session(self, ws: web.WebSocketResponse, ua: str) -> None:
         self.ws = ws
@@ -574,6 +646,12 @@ class Node:
         self.mic = False  # mic mode is per page-life; the client re-announces it
         self.run_playback = None
         self.restarts = 0
+        self.sample_rate = None  # the hello that follows says these again
+        self.base_latency_ms = None
+        self.output_latency_ms = None
+        self.servo = {}
+        self.last_start = None
+        self.map_ms = None
         # The build stamped into the page this node actually loaded. Survives a
         # WebSocket reconnect, because the page did — which is the case a
         # connect-time check would wrongly call fresh.
@@ -836,6 +914,14 @@ class Node:
             # Starts after the first for the current playback — re-anchors, in
             # practice. The EVENTS card has each one with its time.
             "restarts": self.restarts,
+            # The device as it described itself in its hello; the cause of its
+            # last start; the output-timestamp mapping its servo is built on.
+            "sampleRate": self.sample_rate,
+            "baseLatencyMs": self.base_latency_ms,
+            "outputLatencyMs": self.output_latency_ms,
+            "servo": self.servo,
+            "lastStart": self.last_start,
+            "mapMs": self.map_ms,
         }
         if est is not None:
             d.update(
@@ -1262,6 +1348,16 @@ class Conductor:
         if self.trace is not None:
             self.trace.write(kind, **fields)
 
+    async def notice(self, node: Node, text: str, ttl_s: float = 8.0) -> None:
+        """One line on one node's own screen, for `ttl_s` seconds.
+
+        The conductor knows things a node cannot: that it was deferred and
+        why, that its catch-up is about to land, that it sat a track out. A
+        page too old to know the message ignores it. Text, never markup — the
+        player shows it with textContent.
+        """
+        await node.send({"type": "notice", "text": text, "ttlS": ttl_s})
+
     # --- ping cadence -----------------------------------------------------------
 
     async def _ping_loop(self, node: Node) -> None:
@@ -1348,7 +1444,9 @@ class Conductor:
             self._advance_task.cancel()
         self._advance_task = None
 
-    async def _transport_play(self, track: Track, seek_ms: float = 0.0) -> None:
+    async def _transport_play(
+        self, track: Track, seek_ms: float = 0.0, why: str = "play"
+    ) -> None:
         self._cancel_advance()
         await self._disarm()  # a superseded start must not leave a countdown up
         self.target_track = track  # what the download-% pill is allowed to reflect
@@ -1435,7 +1533,7 @@ class Conductor:
 
         self.arming = None  # the play command below is what retires the countdown
         t_start = now() + PLAY_LEAD
-        self.playing = Playback(track=track, t_start=t_start, seek_ms=seek_ms)
+        self.playing = Playback(track=track, t_start=t_start, seek_ms=seek_ms, why=why)
         started, deferred = [], []
         for node in ready:
             if await self._send_play(node, self.playing):
@@ -1455,6 +1553,12 @@ class Conductor:
                 toast=True, track=track.id, nodes=[n.name for n in deferred],
             )
             for node in deferred:
+                # The silent speaker finally says why it is silent. Long enough
+                # to outlast the catch-up, which replaces it either way.
+                await self.notice(
+                    node, "clock still settling - joining automatically",
+                    CATCHUP_WAIT_S + 5.0,
+                )
                 self._dispatch_catchup(node, track.id)
         if started:
             await self.event(
@@ -1524,6 +1628,9 @@ class Conductor:
                 "title": p.track.title,
                 "atNodeMs": at_node_ms,
                 "seekMs": p.seek_ms,
+                # Echoed back as the cause of the node's source start. An old
+                # page ignores it and reports no cause, which reads as unknown.
+                "why": p.why,
             }
         )
         return True
@@ -1553,9 +1660,11 @@ class Conductor:
             if start_ready(node.model):
                 t_join = now() + CATCHUP_LEAD
                 catch = Playback(
-                    track=p.track, t_start=t_join, seek_ms=p.position_ms(t_join)
+                    track=p.track, t_start=t_join, seek_ms=p.position_ms(t_join),
+                    why="catchup",
                 )
                 if await self._send_play(node, catch):
+                    await self.notice(node, "joining now", 6.0)
                     await self.event(
                         "catchup",
                         'joined "%s" at %s after %.1f s' % (
@@ -1569,6 +1678,10 @@ class Conductor:
         # track is the one outcome here that deserves a line on the page.
         p = self.playing
         if p is not None and p.track.id == track_id and node.connected:
+            await self.notice(
+                node, "could not join this track - clock never settled; next track",
+                30.0,
+            )
             await self.event(
                 "catchup-timeout",
                 'could not join "%s" - clock still not fit to time a start after '
@@ -1600,7 +1713,7 @@ class Conductor:
             self.playing = None
             await self.push_state()
             return
-        self.dispatch(self._transport_play(nxt))
+        self.dispatch(self._transport_play(nxt, why="auto"))
 
     async def _transport_pause(self) -> None:
         p = self.playing
@@ -1725,6 +1838,7 @@ class Conductor:
             return
         spk = speakers[0]
         await self.toast(f"Measuring {spk.name} -> {mic.name}...")
+        await self.notice(mic, "measuring - keep still", 5.0)
         res = await self._probe_once(spk, mic)
         if res is None:
             await self.toast(f"No usable capture from {spk.name}.")
@@ -1775,6 +1889,7 @@ class Conductor:
             return
 
         self._calibrating = True
+        await self.notice(mic, "measuring - keep still", 30.0)
         rows: Dict[str, List[dict]] = {n.client_id: [] for n in speakers}
         try:
             total = len(speakers) * CAL_REPS
@@ -1935,14 +2050,28 @@ class Conductor:
         node.begin_session(ws, str(hello.get("ua", ""))[:120])
         node.mesh = supports_mesh
         node.build = build
+        # What the device is, in its own words - clamped, it is client data.
+        # A page too old to say leaves these empty.
+        node.sample_rate = _clean_hz(hello.get("sampleRate"))
+        node.base_latency_ms = _clean_latency_ms(hello.get("baseLatencyMs"))
+        node.output_latency_ms = _clean_latency_ms(hello.get("outputLatencyMs"))
+        node.servo = _clean_servo(hello.get("servo"))
         self._drop_mesh_pairs_for(node.client_id)  # stale pairs from a past life
+        device = ""
+        if node.sample_rate is not None:
+            device = " [%.0f Hz" % node.sample_rate
+            if node.base_latency_ms is not None:
+                device += ", base %.1f ms" % node.base_latency_ms
+            if node.output_latency_ms is not None:
+                device += ", out %.1f ms" % node.output_latency_ms
+            device += "]"
         # Tail slice: date-based fallback ids all share the same *head*. A known
         # id is "back", not "joined" — but a socket reconnect and a page reload
         # look the same from here, and only a build that changed proves the
         # page itself was reloaded.
         await self.event(
             "join",
-            "%s (~%s)%s%s%s" % (
+            "%s (~%s)%s%s%s%s" % (
                 "joined" if fresh else (
                     "back, reloaded" if build and prev_build and build != prev_build
                     else "back"
@@ -1952,9 +2081,12 @@ class Conductor:
                 " [mesh]" if node.mesh else "",
                 "" if node.prior_skew is None
                 else " [seeded %+.1f ppm]" % (node.prior_skew * 1e6),
+                device,
             ),
             node=node, fresh=fresh, build=build, mesh=node.mesh,
             seededPpm=None if node.prior_skew is None else node.prior_skew * 1e6,
+            sampleRate=node.sample_rate, baseLatencyMs=node.base_latency_ms,
+            outputLatencyMs=node.output_latency_ms, servo=node.servo,
         )
         await self.note_build(node)
 
@@ -2192,6 +2324,10 @@ class Conductor:
                     node.note_rate(node.play_rate)
             except (KeyError, ValueError, TypeError):
                 pass
+            # The output-timestamp mapping the node's perfToCtx is built on. A
+            # stepping mapping was the one loose end of the tablet thread; now
+            # it is a column in the trace. None from a page too old to send it.
+            node.map_ms = _clean_map_ms(data.get("mapMs"))
             if self.trace is not None:
                 # The servo's own reading, with the clock it was steered from.
                 # The TODO's "~10-line JSONL sidecar per steerAck", exactly.
@@ -2209,6 +2345,7 @@ class Conductor:
                     skewPpm=None if est is None else est.skew_ppm,
                     nUsed=0 if est is None else est.n_used,
                     lastRttMs=None if est is None else est.last_rtt * 1000.0,
+                    mapMs=node.map_ms,
                 )
         elif kind == "state":
             node.playing_track = data.get("playing")
@@ -2235,16 +2372,55 @@ class Conductor:
                 # the count and a re-anchor does not.
                 p = self.playing
                 track = str(node.playing_track)[:12]
+                # Why, in the node's own words — allow-listed, because a cause
+                # is a label and a label we did not define is not one. The
+                # conductor's `why` comes back as-is; a re-anchor names the
+                # rule that fired (REANCHOR_S is a fault, SLEW_PATIENCE_S is
+                # patience) and the error that fired it; a late start says how
+                # late; an old page says nothing, which reads as unknown.
+                cause = _clean_choice(data.get("cause"), START_CAUSES, "unknown")
+                reason = _clean_choice(data.get("reason"), RESTART_REASONS, None)
+                err = _clean_err_ms(data.get("errMs"))
+                late = _clean_pos_ms(data.get("lateMs"))
+                node.last_start = {
+                    "cause": cause, "reason": reason, "errMs": err, "lateMs": late,
+                }
+                said = cause
+                if cause == "reanchor" and reason:
+                    said = "re-anchor, %s%s" % (
+                        reason, "" if err is None else " at %+.0f ms" % err)
+                if late:
+                    said += ", %.0f ms late" % late
                 if p is not None and node.run_playback is p:
                     node.restarts += 1
                     await self.event(
-                        "restart", f"source restarted (#{node.restarts} this track)",
+                        "restart",
+                        f"source restarted (#{node.restarts} this track): {said}",
                         node=node, level="warning", restarts=node.restarts, track=track,
+                        cause=cause, reason=reason, errMs=err, lateMs=late,
                     )
                 else:
                     node.run_playback = p
                     node.restarts = 0
-                    await self.event("start", "source started", node=node, track=track)
+                    await self.event(
+                        "start", f"source started ({said})", node=node, track=track,
+                        cause=cause, reason=reason, errMs=err, lateMs=late,
+                    )
+        elif kind == "ctxState":
+            # The AudioContext's own state: the "phone slept" signal that used
+            # to be inferred from a hard re-anchor on wake. Rare, allow-listed.
+            state = _clean_choice(data.get("state"), CTX_STATES, None)
+            if state is not None:
+                await self.event(
+                    "ctx", f"audio context {state}", node=node,
+                    level="info" if state == "running" else "warning", state=state,
+                )
+        elif kind == "visibility":
+            hidden = bool(data.get("hidden"))
+            await self.event(
+                "visibility", "page hidden" if hidden else "page visible",
+                node=node, hidden=hidden,
+            )
         elif kind == "spectrum":
             # Cosmetic per-node level meter, relayed straight to any open control
             # page — never stored, never touches timing. Clamp hard: client data.
@@ -2342,7 +2518,9 @@ class Conductor:
         elif cmd == "resume":
             if self.paused is not None:
                 self.dispatch(
-                    self._transport_play(self.paused.track, self.paused.seek_ms)
+                    self._transport_play(
+                        self.paused.track, self.paused.seek_ms, why="resume"
+                    )
                 )
         elif cmd == "seek":
             # Jump the current track to an absolute position — a coordinated
@@ -2356,7 +2534,7 @@ class Conductor:
                 except (ValueError, TypeError):
                     return
                 pos = max(0.0, min(pos, cur.track.duration_ms - 250.0))
-                self.dispatch(self._transport_play(cur.track, pos))
+                self.dispatch(self._transport_play(cur.track, pos, why="seek"))
         elif cmd == "next":
             current = (self.playing or self.paused)
             if current is not None:
@@ -2365,7 +2543,7 @@ class Conductor:
                 # Nothing playing: ⏭ starts the queue head, or the library top.
                 nxt = self._take_next_idle()
             if nxt:
-                self.dispatch(self._transport_play(nxt))
+                self.dispatch(self._transport_play(nxt, why="next"))
         elif cmd == "stop":
             self.dispatch(self._transport_stop())
         elif cmd == "beep":

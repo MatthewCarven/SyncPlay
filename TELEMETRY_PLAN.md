@@ -1,9 +1,11 @@
 # Plan — telemetry for feedback, debug and datalogging
 
-Status: **slices 1 and 2 built 2026-09-03; slice 3 not started** (it needs
-the fleet reload, and goes after the bring-up). Three slices, three commits,
+Status: **all three slices built 2026-09-03.** Three slices, three commits,
 each one a `git revert` from the last. Matthew asked for all three as
-separate slices, and for the plan before any code.
+separate slices, and for the plan before any code. Slice 3 went in the same
+day, before the bring-up rather than after: Matthew's reload was already
+coming for a data capture, so the open sequencing call below answered
+itself.
 
 Where it sits in the order agreed the same evening (worklog 2026-09-02):
 slices 1 and 2 need no fleet reload and go **before the bring-up evening**,
@@ -233,6 +235,20 @@ notice appears on defer, the tooltip shows the sample rate, the trace carries
 the causes.
 
 Size: ~90 lines player, ~80 conductor, ~30 control, harness + tests.
+
+**Built 2026-09-03**, as above, with these departures: the cause rides
+`Playback.why` rather than a `_send_play` parameter, so the transient
+catch-up Playback carries `"catchup"` and every caller of `_transport_play`
+names itself; the per-node restart count stays keyed to the Playback object,
+so a seek is a `start (seek)` and only a re-anchor is a `restart`; `lateMs`
+is reported only when the target had already passed; `ctx` events are
+warnings unless the state is `running`, `visibility` is info; a notice is
+clamped to 120 characters and 1–120 s, and an empty one cancels; the
+optional `<details>` log shipped, events only (no steer acks), 40 lines.
+The reanchor harness's stub grew the log pieces `startSource` now calls, and
+`tools/activity_harness.js` is the stub-DOM check. `trace_report.py` prints
+each restart's reason and error. Old pages report no cause, which the
+conductor records as `unknown`.
 
 ## Commit ladder
 
