@@ -6,3 +6,5 @@ venv/
 syncplay_state.json
 # your music stays yours — test tones regenerate via tools/make_test_tones.py
 music/
+# the trace the conductor writes on every start (tools/trace_report.py reads it)
+logs/

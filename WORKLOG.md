@@ -2194,3 +2194,68 @@ the control page that brought all ten back from the ring.
 :8927 conductor serves the new control page harmlessly (an empty card) until
 it is restarted, which is Matthew's call. Slice 2, the JSONL trace and
 `tools/trace_report.py`, is next on "continue".
+
+## 2026-09-03 (cont.) — telemetry slice 2: a trace that outlives the process, and a report for it
+
+Matthew said continue (he had the fleet up on :8927 because he was listening
+to music; it stayed untouched throughout). Slice 2: `syncplay/trace.py` — a
+`Trace` that queues JSON lines in a list and drains them to disk every 2 s
+with one write and one flush; any `OSError` (or a write to a closed file)
+logs once and turns it off for the rest of the run. On by default:
+`logs/trace-YYYYMMDD-HHMMSS.jsonl` under the working directory, `--no-trace`
+to disable, `--trace-dir` to move it, `--trace-samples` for the opt-in raw
+tier. Wired in `__main__` and `build_app(music_dir, trace=None)` — opened
+before the conductor starts so the header is the first line, closed at
+`on_cleanup` so the leave events from shutdown still land — and never in
+`Conductor.__init__`, so no test writes a file unless it asks to. `logs/` is
+git-ignored.
+
+**Lines.** Every line carries `t` (conductor seconds) and `wall`
+(`HH:MM:SS.mmm`, the same clock the log stamps; `wall_clock()` now lives in
+trace.py and the event ring uses it too). `start` once: build, music dir,
+`PLAY_LEAD`, `CATCHUP_LEAD`, `CATCHUP_WAIT_S`, `MIN_JOIN_SAMPLES`,
+`EVENT_RING`, `TRACE_PERIOD_S`, whether samples are on. `event`: every slice-1
+row verbatim, its own kind moved to `event` because the line's kind is
+"event". `steer`: per steerAck — node, track, errMs, rate, runS, offsetMs,
+trustMs, skewPpm, nUsed, lastRttMs (the TODO's ten-line sidecar, exactly).
+`node`: every `TRACE_PERIOD_S` (10 s) per connected node, `stats()` as it
+is. `mesh`: every 10 s, the `_mesh_snapshot()` rows. `sample` (opt-in): the
+raw `t0, c1, c2, t3` in seconds at both `model.add(PingSample(...))` sites,
+`peer` null for star pings and the peer id for mesh ones — the replay tier
+for the parked `filter_best` re-tune.
+
+**`tools/trace_report.py`**, standard library only: the newest trace in
+`logs/` or a path; `--since`/`--until` on wall time, `--node` (substring; a
+fleet-wide event with no node survives the filter as context), `--csv` for
+the steer lines. Prints per node n / mean / sd / min / max / zero-crossings of
+`err ms`, survival and the audio-clock reading with its credibility from the
+node lines, restarts with their times; the fleet spread of means in ms and
+metres of air; the starts (defers, catch-ups with seconds waited, timeouts,
+plays); mesh closure best/worst per pair; the warnings timeline. A trace cut
+off mid-line by a dead process loses that line and nothing else.
+
+**Verified.** `tests/test_trace.py`, 18 tests: header first and every kind
+serialises; a field JSON cannot spell becomes its str; lines queued before
+the file opens are kept; a closed file and a full disk each turn the trace
+off with playback unaffected (a play still goes out, the ring still has it);
+`--no-trace` writes nothing; the periodic lines run and stop with a real
+app over real sockets; steer lines carry the servo numbers with client data
+clamped; events reach the trace with their fields and the same `t` as the
+ring; samples are opt-in; the report prints planted means and sds back
+exactly (an alternating ±sd series of 400, so the sample-sd factor vanishes
+at two decimals), the 8.00 ms = 2.74 m spread, the restart, the catch-up and
+its timeout, mesh best/worst, the warnings in order; the filters; the
+cut-off last line; the CSV; the CLI on the newest of two traces — 346 pass.
+The report output is ASCII apart from node names, because a cp1252 console
+choked on a middle dot in the first run. Then live: a throwaway conductor on
+:8931 from the scratchpad wrote `logs/trace-20260903-134541.jsonl` by
+default; a dev node joined and I pressed play one second later, so the gate
+deferred it (`defer`, then `nostart` — the exact sequence Matthew will see if
+he plays within 30 s of a join), then stop, resync, leave; the report read
+the real file: 10 lines, one warning, 99 % survival, no steer lines because
+nothing ever played, and said so with dashes rather than a crash.
+
+**Not changed:** `player.js`. The live :8927 conductor writes no trace until
+it is restarted — Matthew's call; from then on every evening is on disk.
+Slice 3 (device facts, causes, notices; needs the reload) goes after the
+bring-up as planned.

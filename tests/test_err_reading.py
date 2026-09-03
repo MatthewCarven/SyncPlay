@@ -184,8 +184,8 @@ def test_no_attribution_from_a_node_that_is_not_playing(node):
 # --- client data ------------------------------------------------------------
 
 
-def test_a_nonsense_err_never_lands():
-    cond = Conductor.__new__(Conductor)
+def test_a_nonsense_err_never_lands(bare):
+    cond = bare
     n = Node("id", "n")
     for junk in ("banana", None, float("nan"), float("inf")):
         asyncio.run(Conductor._on_player_msg(
@@ -194,10 +194,10 @@ def test_a_nonsense_err_never_lands():
         assert n.err_seen_at is None, "a rejected reading must not stamp freshness"
 
 
-def test_an_outrageous_err_is_clamped_not_dropped():
+def test_an_outrageous_err_is_clamped_not_dropped(bare):
     """A re-anchor reports the error that caused it, and that sample is the most
     informative one there is. Bound it; do not filter it away."""
-    cond = Conductor.__new__(Conductor)
+    cond = bare
     n = Node("id", "n")
     asyncio.run(Conductor._on_player_msg(
         cond, n, {"type": "steerAck", "errMs": 1e12, "rate": 1.0}, now()))

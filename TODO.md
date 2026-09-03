@@ -177,11 +177,11 @@ the player audio path only when unavoidable, one commit per feature so
 ## Next candidates
 
 - [ ] **Telemetry ladder — events, trace, device facts** (planned 2026-09-02;
-      slice 1 done 2026-09-03, slices 2 and 3 to go)
+      slices 1 and 2 done 2026-09-03, slice 3 to go)
   - Full plan in [TELEMETRY_PLAN.md](TELEMETRY_PLAN.md). Slice 1 (done 2026-09-03): an `event()`
     helper, a bounded ring and an EVENTS card on control — the toasts stop
     forgetting, the catch-up deadline gets a voice, restarts get counted. No
-    reload. Slice 2: a JSONL trace on by default (`--no-trace`): events,
+    reload. Slice 2 (done 2026-09-03): a JSONL trace on by default (`--no-trace`): events,
     steerAcks, 10 s node and mesh lines, opt-in raw samples, and
     `tools/trace_report.py` — the capture tables, promoted to a tool. No
     reload. Slice 3: `hello` carries sampleRate/latencies and the servo
@@ -479,7 +479,7 @@ the player audio path only when unavoidable, one commit per feature so
     TELEMETRY_PLAN.md (slice 2 is the trace; slice 3 carries the latency /
     sample-rate rows and a restart cause). The sparkline stays parked and
     becomes a read of the trace.
-  - **A trace that outlives the process.** The shipped fields answer "what is it
+  - **A trace that outlives the process.** Done 2026-09-03 (telemetry slice 2: syncplay/trace.py + tools/trace_report.py). The shipped fields answer "what is it
     doing now"; they cannot answer "is this the same thing we saw in July",
     which is the question actually being asked. A ~10-line JSONL sidecar per
     steerAck would make a reading taken next month comparable rather than a

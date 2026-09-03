@@ -1,8 +1,9 @@
 # Plan — telemetry for feedback, debug and datalogging
 
-Status: **slice 1 built 2026-09-03; slices 2 and 3 not started.** Three
-slices, three commits, each one a `git revert` from the last. Matthew asked
-for all three as separate slices, and for the plan before any code.
+Status: **slices 1 and 2 built 2026-09-03; slice 3 not started** (it needs
+the fleet reload, and goes after the bring-up). Three slices, three commits,
+each one a `git revert` from the last. Matthew asked for all three as
+separate slices, and for the plan before any code.
 
 Where it sits in the order agreed the same evening (worklog 2026-09-02):
 slices 1 and 2 need no fleet reload and go **before the bring-up evening**,
@@ -165,6 +166,20 @@ restart — and must print the planted numbers (the `plan_nudges` pattern). Then
 the real one: the trace from the bring-up evening.
 
 Size: ~150 lines conductor + `__main__`, ~200 tool, tests.
+
+**Built 2026-09-03**, as above. Departures worth knowing: the trace lives in
+its own module, `syncplay/trace.py`, and the conductor holds it as
+`self.trace` (None unless `build_app` attached one) behind a `_trace()`
+helper; `wall_clock()` moved there and the event ring uses it. An `event`
+line carries the row verbatim with its own kind under `event`, because the
+line's kind is "event". The header also records `CATCHUP_LEAD`,
+`EVENT_RING` and `TRACE_PERIOD_S`. A write to a closed file (`ValueError`)
+is treated like an `OSError`. Lines queued before the file opens are kept,
+so handler ordering cannot lose the header. The report is ASCII apart from
+node names — a cp1252 console choked on a middle dot — and reconfigures
+stdout to replace what it cannot encode. The trace lands in `logs/` under
+the working directory, so `start.cmd` puts it in the repo (git-ignored) and
+a throwaway run from elsewhere keeps its own.
 
 ## Slice 3 — the node says what it is, and what it did
 

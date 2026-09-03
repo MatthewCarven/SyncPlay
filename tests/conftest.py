@@ -25,4 +25,5 @@ def bare():
     cond.paused = None
     cond.mesh_pairs = {}
     cond.mesh_seen = {}
+    cond.trace = None  # no file unless a test attaches one
     return cond

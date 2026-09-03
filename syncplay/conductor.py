@@ -27,6 +27,7 @@ from typing import Deque, Dict, List, Optional, Set, Tuple
 from aiohttp import WSMsgType, web
 
 from .timesync import ClockModel, PingSample
+from .trace import Trace, wall_clock
 
 log = logging.getLogger("syncplay")
 
@@ -137,18 +138,14 @@ PING_INTERVAL_MIN = 0.5  # never spin the loop faster than this, whatever the bo
 # page gets slow.
 EVENT_RING = 300
 EVENT_LEVELS = ("debug", "info", "warning")
+# The trace on disk (see trace.py) gets a `node` line per connected node and a
+# `mesh` line per pair this often. Events and steer acks go as they happen.
+TRACE_PERIOD_S = 10
 
 
 def now() -> float:
     """The conductor's reference clock (seconds). Everyone syncs to this."""
     return time.perf_counter()
-
-
-def _wall() -> str:
-    """Wall-clock HH:MM:SS.mmm - for lining an event up against what was heard,
-    and against the log, which stamps the same clock."""
-    t = time.time()
-    return time.strftime("%H:%M:%S", time.localtime(t)) + ".%03d" % int(t % 1 * 1000)
 
 
 def _mmss(ms: float) -> str:
@@ -869,6 +866,9 @@ class Conductor:
         # What happened, the most recent EVENT_RING of it, for a control page
         # that opens after the fact. See `event`.
         self.events: Deque[dict] = deque(maxlen=EVENT_RING)
+        # The trace on disk, if `build_app` attached one. Never created here:
+        # no test writes a file unless it asks to.
+        self.trace: Optional[Trace] = None
         self.playing: Optional[Playback] = None
         self.paused: Optional[Playback] = None  # t_start meaningless; seek_ms is the position
         # Explicit play order layered over the folder scan. Track ids, duplicates
@@ -1029,6 +1029,16 @@ class Conductor:
     # --- lifecycle ------------------------------------------------------------
 
     async def start(self, _app: web.Application) -> None:
+        # The trace's header: what this run was, and the constants a reader
+        # needs to interpret the rest. The player's own servo constants arrive
+        # with the node's hello once it says them (telemetry slice 3).
+        self._trace(
+            "start", build=self.player_build(), musicDir=str(self.music_dir),
+            playLeadS=PLAY_LEAD, catchupLeadS=CATCHUP_LEAD,
+            catchupWaitS=CATCHUP_WAIT_S, minJoinSamples=MIN_JOIN_SAMPLES,
+            eventRing=EVENT_RING, tracePeriodS=TRACE_PERIOD_S,
+            samples=bool(self.trace is not None and self.trace.samples),
+        )
         self._pulse_task = asyncio.create_task(self._pulse())
 
     async def shutdown(self, _app: web.Application) -> None:
@@ -1063,6 +1073,17 @@ class Conductor:
                             )
                 await self._steer_all()
                 await self._reap_mesh()
+            if self.trace is not None and tick % TRACE_PERIOD_S == 0:
+                self._trace_periodic()
+
+    def _trace_periodic(self) -> None:
+        """The numbers every node and every mesh pair would show right now."""
+        current = self.playing.track.id if self.playing else None
+        for node in self.nodes.values():
+            if node.connected:
+                self._trace("node", **node.stats(current))
+        for row in self._mesh_snapshot():
+            self._trace("mesh", **row)
 
     async def _reap_mesh(self) -> None:
         """Drop mesh pairs that stopped reporting (the channel died quietly).
@@ -1213,7 +1234,7 @@ class Conductor:
             level = "info"
         row = {
             "t": now(),
-            "wall": _wall(),
+            "wall": wall_clock(),
             "kind": kind,
             "level": level,
             "node": None if node is None else node.client_id,
@@ -1225,6 +1246,9 @@ class Conductor:
             "%s%s: %s", kind, "" if node is None else " " + node.name, text
         )
         self.events.append(row)
+        line = dict(row)
+        line["event"] = line.pop("kind")  # on disk the line's own kind is "event"
+        self._trace("event", **line)
         await self._broadcast_control({"type": "event", **row})
         if toast:
             await self._broadcast_control({
@@ -1232,6 +1256,11 @@ class Conductor:
                 "text": text if node is None else f"{node.name}: {text}",
             })
         return row
+
+    def _trace(self, kind: str, **fields) -> None:
+        """One line to the trace on disk, if there is one. Never blocks."""
+        if self.trace is not None:
+            self.trace.write(kind, **fields)
 
     # --- ping cadence -----------------------------------------------------------
 
@@ -1982,14 +2011,20 @@ class Conductor:
         if kind == "pong":
             t0 = node.pending.pop(data.get("id"), None)
             if t0 is not None:
-                node.model.add(
-                    PingSample(
-                        t0=t0,
-                        c1=float(data["c1"]) / 1000.0,
-                        c2=float(data["c2"]) / 1000.0,
-                        t3=t3,
-                    )
+                s = PingSample(
+                    t0=t0,
+                    c1=float(data["c1"]) / 1000.0,
+                    c2=float(data["c2"]) / 1000.0,
+                    t3=t3,
                 )
+                node.model.add(s)
+                if self.trace is not None and self.trace.samples:
+                    # The opt-in tier: the exchange itself, so a different
+                    # RTT filter can be replayed against real pongs offline.
+                    self._trace(
+                        "sample", node=node.client_id, name=node.name, peer=None,
+                        t0=s.t0, c1=s.c1, c2=s.c2, t3=s.t3,
+                    )
             if len(node.pending) > 64:  # drop pings the node never answered
                 cutoff = now() - PENDING_PING_TTL
                 node.pending = {k: v for k, v in node.pending.items() if v > cutoff}
@@ -2123,18 +2158,22 @@ class Conductor:
                 if model is None:
                     model = self.mesh_pairs[key] = ClockModel(window=180.0)
                 try:
-                    model.add(
-                        PingSample(
-                            t0=float(data["t0"]) / 1000.0,
-                            c1=float(data["c1"]) / 1000.0,
-                            c2=float(data["c2"]) / 1000.0,
-                            t3=float(data["t3"]) / 1000.0,
-                        )
+                    s = PingSample(
+                        t0=float(data["t0"]) / 1000.0,
+                        c1=float(data["c1"]) / 1000.0,
+                        c2=float(data["c2"]) / 1000.0,
+                        t3=float(data["t3"]) / 1000.0,
                     )
+                    model.add(s)
                     seen_before = key in self.mesh_seen
                     self.mesh_seen[key] = now()
                 except (KeyError, ValueError, TypeError):
                     return
+                if self.trace is not None and self.trace.samples:
+                    self._trace(
+                        "sample", node=node.client_id, name=node.name, peer=peer,
+                        t0=s.t0, c1=s.c1, c2=s.c2, t3=s.t3,
+                    )
                 if not seen_before:
                     # First usable sample for this pair — or the first since
                     # the pulse reaped it, which is the pairing worth reading.
@@ -2153,6 +2192,24 @@ class Conductor:
                     node.note_rate(node.play_rate)
             except (KeyError, ValueError, TypeError):
                 pass
+            if self.trace is not None:
+                # The servo's own reading, with the clock it was steered from.
+                # The TODO's "~10-line JSONL sidecar per steerAck", exactly.
+                est = node.model.estimate()
+                rate = node.play_rate
+                self._trace(
+                    "steer", node=node.client_id, name=node.name,
+                    track=None if node.playing_track is None
+                    else str(node.playing_track)[:12],
+                    errMs=err,
+                    rate=rate if rate is not None and math.isfinite(rate) else None,
+                    runS=None if node.run_since is None else now() - node.run_since,
+                    offsetMs=None if est is None else est.offset_at(now()) * 1000.0,
+                    trustMs=None if est is None else est.trust_ms,
+                    skewPpm=None if est is None else est.skew_ppm,
+                    nUsed=0 if est is None else est.n_used,
+                    lastRttMs=None if est is None else est.last_rtt * 1000.0,
+                )
         elif kind == "state":
             node.playing_track = data.get("playing")
             if node.playing_track is None:
@@ -2518,8 +2575,9 @@ async def _no_cache(request: web.Request, handler):
     return resp
 
 
-def build_app(music_dir: Path) -> web.Application:
+def build_app(music_dir: Path, trace: Optional[Trace] = None) -> web.Application:
     conductor = Conductor(music_dir)
+    conductor.trace = trace
     app = web.Application(middlewares=[_no_cache])
     app["conductor"] = conductor
     app.router.add_get("/", conductor.handle_player_page)
@@ -2528,6 +2586,13 @@ def build_app(music_dir: Path) -> web.Application:
     app.router.add_get("/ws/player", conductor.handle_player_ws)
     app.router.add_get("/ws/control", conductor.handle_control_ws)
     app.router.add_static("/static", WEB_DIR)
+    if trace is not None:
+        # Opened before the conductor starts, so the header it writes is the
+        # first line; closed at cleanup, after shutdown, so the leave events
+        # from closing the fleet's sockets still land.
+        app.on_startup.append(trace.start)
     app.on_startup.append(conductor.start)
     app.on_shutdown.append(conductor.shutdown)
+    if trace is not None:
+        app.on_cleanup.append(trace.stop)
     return app
