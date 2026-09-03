@@ -109,13 +109,13 @@ def test_stopping_forgets_the_reading_entirely():
 # --- what resets the servo --------------------------------------------------
 
 
-def test_any_non_null_state_starts_a_new_run():
+def test_any_non_null_state_starts_a_new_run(bare):
     """The subtle one. player.js sends `state` from exactly one place —
     startSource — so a non-null report means a source just started at rate 1.0.
     A re-anchor restart, a seek and a mid-song catch-up all do that under the
     *same* trackId, so a run boundary keyed to a track change would miss all
     three and average a fresh 45 s climb into the settled figure."""
-    cond = Conductor.__new__(Conductor)
+    cond = bare
     n = Node("id", "n")
     msg = {"type": "state", "playing": "same-track"}
     asyncio.run(Conductor._on_player_msg(cond, n, msg, now()))
@@ -246,10 +246,10 @@ def test_too_few_acks_is_refused_however_settled(node):
     assert node.audio_clock_credible() is False
 
 
-def test_a_new_run_forgets_the_previous_run_stats():
+def test_a_new_run_forgets_the_previous_run_stats(bare):
     """A restart resets the trim to 1.0, so carrying the old spread across would
     describe a servo that no longer exists."""
-    cond = Conductor.__new__(Conductor)
+    cond = bare
     n = settled(Node("id", "n"))
     assert n.dist_n == 20
     asyncio.run(Conductor._on_player_msg(

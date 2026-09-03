@@ -2146,3 +2146,51 @@ suspend/visibility events and a `notice` on the node's activity bar (reload,
 after the bring-up). Two rules run through it: no new traffic on the tablets'
 radios, and a diagnostic must never be the reason nobody can play. Plan only —
 nothing built; Matthew wanted the plan first.
+
+## 2026-09-03 — telemetry slice 1: an EVENTS card, what the toasts used to forget
+
+Matthew pushed `bdc5f53` and said continue, so slice 1 of the telemetry ladder
+went in. `Conductor.event(kind, text, *, node, level, toast, **fields)` logs
+the line, appends it to a `deque(maxlen=EVENT_RING)` (300), pushes
+`{"type": "event"}` to every open control page and toasts when asked.
+`toast()` is now a one-line wrapper over it, so all 29 call sites are
+unchanged and every toast leaves a row. A control page gets the ring once on
+connect as `{"type": "events"}`, straight after its first snapshot — never
+inside the 1 Hz snapshot. The EVENTS card sits between NODES and SPECTRUM:
+newest first, `HH:MM:SS · node · text · kind`, warnings amber, restarts red,
+debug dim, a page-local clear, scrolling inside the card past 300 px.
+
+**What speaks now that did not.** The catch-up deadline (`_catchup` used to
+just return) is a `catchup-timeout` warning and a toast; a catch-up that joins
+says how long it waited. Every non-null `state` is a `start`, and the second
+and later ones for the same `Playback` are `restart` warnings, with a per-node
+`restarts` count in `stats()` and in the err cell's tooltip — keyed to the
+Playback object rather than the track id, so a seek resets the count and a
+re-anchor does not. Also: join/leave (a known id is "back", and "back,
+reloaded" only when its build changed), stale-build, arm, play, defer,
+straggler, noload, nostart, pause, stop, startRefused, loadError, cadence
+(debug), mesh-up / mesh-lost (debug), queue edits (debug). At leave,
+`drift-banked` or `drift-refused` with the reason: `remember_skew` no longer
+logs its refusal on every state save — it leaves `bank_note`, reported once
+when it matters. Two small refactors for testability, `_node_left` and
+`_reap_mesh`, and `note_build` is async because it emits the event.
+
+**Verified.** `tests/test_events.py`, 29 tests: the ring bound,
+toast-is-an-event, history-then-live over real aiohttp sockets, the
+back/reloaded wording, the restart count and its reset, the catch-up timeout
+and join, bank notes, boost quarter-steps, mesh up/lost, the transport trail
+— 328 pass (a `bare` conductor fixture in `tests/conftest.py` now carries the
+ring and the socket set for the tests that drive one method).
+`tools/events_harness.js` runs the shipped `eventRowHtml` / `eventClass` /
+`renderEvents` / `pushEvent` out of `control.js` against a stub DOM: order,
+cap, escaping, classes, empty cells, clear — 21 checks pass. Then live on a
+throwaway conductor on :8931, run from the scratchpad so it had its own state
+file (the real fleet was up on :8927 with three remote nodes the whole time,
+untouched): a dev node's join, two toasts, arm, play, start, stop, leave, a
+drift-refused with its reason, a `noload` warning in amber, and a reload of
+the control page that brought all ten back from the ring.
+
+**Not changed:** `player.js` — no reload owed by this slice. The running
+:8927 conductor serves the new control page harmlessly (an empty card) until
+it is restarted, which is Matthew's call. Slice 2, the JSONL trace and
+`tools/trace_report.py`, is next on "continue".

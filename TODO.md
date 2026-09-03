@@ -176,9 +176,9 @@ the player audio path only when unavoidable, one commit per feature so
 
 ## Next candidates
 
-- [ ] **Telemetry ladder — events, trace, device facts** (planned 2026-09-02,
-      nothing built; three separate slices)
-  - Full plan in [TELEMETRY_PLAN.md](TELEMETRY_PLAN.md). Slice 1: an `event()`
+- [ ] **Telemetry ladder — events, trace, device facts** (planned 2026-09-02;
+      slice 1 done 2026-09-03, slices 2 and 3 to go)
+  - Full plan in [TELEMETRY_PLAN.md](TELEMETRY_PLAN.md). Slice 1 (done 2026-09-03): an `event()`
     helper, a bounded ring and an EVENTS card on control — the toasts stop
     forgetting, the catch-up deadline gets a voice, restarts get counted. No
     reload. Slice 2: a JSONL trace on by default (`--no-trace`): events,

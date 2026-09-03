@@ -26,7 +26,7 @@ from syncplay.conductor import PLAYER_SCRIPT_TAG, Conductor, Node, now
 
 
 @pytest.fixture()
-def cond(tmp_path, monkeypatch):
+def cond(tmp_path, monkeypatch, bare):
     import syncplay.conductor as C
 
     web = tmp_path / "web"
@@ -37,7 +37,7 @@ def cond(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(C, "WEB_DIR", web)
-    c = Conductor.__new__(Conductor)
+    c = bare
     c._build = None
     c._build_key = None
     return c, web
@@ -102,14 +102,18 @@ def test_a_stale_node_is_named_in_the_log(cond, caplog):
     c, web = cond
     node = Node("id", "Mums-Tablet")
     node.build = c.player_build()
-    assert c.note_build(node) is False, "a node on the served build is not stale"
+    assert asyncio.run(c.note_build(node)) is False, "a node on the served build is not stale"
 
     (web / "player.js").write_text("// v2 changed", encoding="utf-8")
     with caplog.at_level(logging.WARNING):
-        assert c.note_build(node) is True
+        assert asyncio.run(c.note_build(node)) is True
     assert "Mums-Tablet" in caplog.text
     assert "has not reloaded" in caplog.text
     assert node.build in caplog.text
+    # ...and on the page, past the moment of the join.
+    assert c.events[-1]["kind"] == "stale-build"
+    assert c.events[-1]["level"] == "warning"
+    assert c.events[-1]["build"] == node.build
 
 
 def test_a_node_that_reports_no_build_is_not_accused(cond, caplog):
@@ -119,7 +123,7 @@ def test_a_node_that_reports_no_build_is_not_accused(cond, caplog):
     c, _ = cond
     node = Node("id", "old-page")
     with caplog.at_level(logging.WARNING):
-        assert c.note_build(node) is False
+        assert asyncio.run(c.note_build(node)) is False
     assert caplog.text == ""
 
 
@@ -134,4 +138,4 @@ def test_a_reconnect_does_not_launder_a_stale_node(cond):
     (web / "player.js").write_text("// v2 changed", encoding="utf-8")
     for _ in range(3):
         # no page reload: same build stamp, socket comes and goes
-        assert c.note_build(node) is True
+        assert asyncio.run(c.note_build(node)) is True

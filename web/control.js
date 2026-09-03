@@ -19,6 +19,8 @@ function connect() {
     try { msg = JSON.parse(ev.data); } catch (_) { return; }
     if (msg.type === "snapshot") { snap = msg; snapAtPerf = performance.now(); render(); }
     else if (msg.type === "toast") toast(msg.text);
+    else if (msg.type === "events") { events = msg.items || []; renderEvents(); }
+    else if (msg.type === "event") pushEvent(msg);
     else if (msg.type === "spectrum") specLatest.set(msg.nodeId, { bands: msg.bands, at: performance.now() });
     else if (msg.type === "micLevel") {
       micLevels.set(msg.nodeId, { rms: msg.rms, at: performance.now() });
@@ -213,6 +215,9 @@ function errCellFor(n, err) {
     return `<td class="num errStale" title="${esc(tip)}">${err}?</td>`;
   }
   const lines = [];
+  if (n.restarts) {
+    lines.push(`restarted ${n.restarts}× this track - each one is in EVENTS with its time`);
+  }
   if (n.ratePpm !== null && n.ratePpm !== undefined) {
     lines.push(`servo rate: ${n.ratePpm >= 0 ? "+" : ""}${n.ratePpm.toFixed(0)} ppm`);
   }
@@ -588,6 +593,50 @@ function showCalResult(m) {
   $("calResult").style.display = rows.length ? "block" : "none";
   $("calProgress").textContent = "";
 }
+
+// --- events ------------------------------------------------------------------
+// What the toast used to forget. The conductor keeps a bounded ring and hands it
+// over once on connect (`events`), then pushes each new one (`event`); this page
+// keeps its own copy and renders it newest-first. Page-local like the spectrum —
+// never part of the snapshot, so a late-opened page catches up in one message
+// and an open one costs nothing per second. `clear` empties this view only; the
+// conductor's ring is not ours to edit.
+const EVENT_CAP = 300;
+let events = [];
+
+function pushEvent(e) {
+  events.push(e);
+  if (events.length > EVENT_CAP) events.splice(0, events.length - EVENT_CAP);
+  renderEvents();
+}
+
+// Colour by what it means, not by what it is called: a warning is amber whatever
+// its kind, a restart is red because it is the thing that gets heard, and debug
+// rows are dim so the card still reads at a glance.
+function eventClass(e) {
+  const cls = [];
+  if (e.level === "warning") cls.push("evWarn");
+  if (e.level === "debug") cls.push("evDim");
+  if (e.kind === "restart") cls.push("evBad");
+  return cls.join(" ");
+}
+
+function eventRowHtml(e) {
+  const wall = String(e.wall || "").slice(0, 8);   // HH:MM:SS; the ms are for the trace
+  return `<tr class="${eventClass(e)}">` +
+    `<td class="evT">${esc(wall)}</td>` +
+    `<td class="evN">${e.name ? esc(e.name) : ""}</td>` +
+    `<td class="evX">${esc(e.text ?? "")} <span class="evK">${esc(e.kind || "")}</span></td>` +
+    `</tr>`;
+}
+
+function renderEvents() {
+  const rows = events.slice(-EVENT_CAP).reverse();
+  $("eventRows").innerHTML = rows.map(eventRowHtml).join("");
+  $("eventsEmpty").style.display = rows.length ? "none" : "block";
+  $("evCount").textContent = rows.length ? `${rows.length} · newest first` : "newest first";
+}
+$("btnEventsClear").onclick = () => { events = []; renderEvents(); };
 
 // --- helpers (also used from inline handlers) --------------------------------------
 function posCellFor(n) {

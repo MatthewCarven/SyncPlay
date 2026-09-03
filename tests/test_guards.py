@@ -40,10 +40,14 @@ def c(lib, monkeypatch):
     cond = Conductor(lib)
     cond.toasts = []
 
-    async def stub_toast(text):
-        cond.toasts.append(text)
+    # Every toast is an event now and every one still reaches the page as a
+    # toast; recording the fan-out rather than stubbing `toast()` keeps these
+    # assertions honest whichever way a message is raised.
+    async def relay(payload):
+        if payload.get("type") == "toast":
+            cond.toasts.append(payload["text"])
 
-    cond.toast = stub_toast
+    cond._broadcast_control = relay
     return cond
 
 
@@ -181,7 +185,7 @@ def test_a_probe_still_runs_when_nothing_is_in_flight(c):
 # --- a refused start must be heard -------------------------------------------
 
 
-def test_a_refused_start_is_logged_and_toasted(caplog):
+def test_a_refused_start_is_logged_and_toasted(bare, caplog):
     """`startSource` used to call `stopCurrent()` — which nulls `current` — and
     only then bail on `seekS >= buf.duration`. That left the node silent with
     `onended` already detached, so it never sent `state`, the conductor went on
@@ -191,8 +195,7 @@ def test_a_refused_start_is_logged_and_toasted(caplog):
     The player now refuses before tearing anything down and says so. This pins
     the saying-so, because the silent version is what cost a node a whole track.
     """
-    cond = Conductor.__new__(Conductor)
-    cond.control_sockets = set()
+    cond = bare
     sent = []
 
     async def relay(payload):
@@ -211,11 +214,10 @@ def test_a_refused_start_is_logged_and_toasted(caplog):
     assert "181.40s" in caplog.text and "181.00s" in caplog.text
 
 
-def test_a_refused_start_survives_rubbish_numbers():
+def test_a_refused_start_survives_rubbish_numbers(bare):
     """Client data. A refusal must still be reported even if its own figures
     are unusable — the report is the point, the numbers are decoration."""
-    cond = Conductor.__new__(Conductor)
-    cond.control_sockets = set()
+    cond = bare
     sent = []
 
     async def relay(payload):

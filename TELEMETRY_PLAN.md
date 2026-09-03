@@ -1,8 +1,8 @@
 # Plan — telemetry for feedback, debug and datalogging
 
-Status: **planned 2026-09-02, nothing built.** Three slices, three commits, each
-one a `git revert` from the last. Matthew asked for all three as separate
-slices, and for the plan before any code.
+Status: **slice 1 built 2026-09-03; slices 2 and 3 not started.** Three
+slices, three commits, each one a `git revert` from the last. Matthew asked
+for all three as separate slices, and for the plan before any code.
 
 Where it sits in the order agreed the same evening (worklog 2026-09-02):
 slices 1 and 2 need no fleet reload and go **before the bring-up evening**,
@@ -94,6 +94,17 @@ escaping through `esc()`, classes. End-to-end on a throwaway conductor on
 :8999, never :8927.
 
 Size: ~120 lines conductor, ~60 control, tests. One new constant.
+
+**Built 2026-09-03**, as above, with these departures worth knowing when
+slice 2 reads the rows: `restarts` is keyed to the `Playback` object, not
+the track id (a seek resets it, a re-anchor does not); `note_build` became
+async because it emits the event; `remember_skew` no longer logs — it leaves
+`bank_note`, and `_node_left` reports `drift-banked` / `drift-refused` once;
+`stop` is only an event when something was up; queue edits are `debug`; the
+transport texts that tests pinned are unchanged. `_reap_mesh` and
+`_node_left` were factored out of `_pulse` and `handle_player_ws` so the
+reap and the leave are testable. Verification as planned, plus
+`tools/events_harness.js` committed, and a live run on a throwaway :8931.
 
 ## Slice 2 — trace: a JSONL sidecar and a report tool
 

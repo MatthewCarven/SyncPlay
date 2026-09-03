@@ -118,10 +118,10 @@ def test_send_play_accepts_a_fitted_model():
     assert asyncio.run(Conductor._send_play(cond, node, _playback())) is True
 
 
-def test_catchup_waits_for_the_clock_and_then_joins():
+def test_catchup_waits_for_the_clock_and_then_joins(bare):
     """A deferred node is not a dropped node. Once its model fits, catch-up
     sends play - and only once."""
-    cond = Conductor.__new__(Conductor)
+    cond = bare
     cond.playing = _playback()
     node = Node("id", "late")
     node.connected = True
@@ -145,11 +145,11 @@ def test_catchup_waits_for_the_clock_and_then_joins():
     assert len(sent) == 1
 
 
-def test_catchup_gives_up_only_after_the_full_wait(monkeypatch):
+def test_catchup_gives_up_only_after_the_full_wait(bare, monkeypatch):
     """The old 5 s bound would have expired before a young model could ever
     fit. The wait has to cover min_slope_span, and it has to *end*."""
     assert CATCHUP_WAIT_S > 30.0
-    cond = Conductor.__new__(Conductor)
+    cond = bare
     cond.playing = _playback()
     node = Node("id", "never")
     node.connected = True
@@ -175,10 +175,10 @@ def test_catchup_gives_up_only_after_the_full_wait(monkeypatch):
     assert calls == []
 
 
-def test_one_catchup_per_node_at_a_time():
+def test_one_catchup_per_node_at_a_time(bare):
     """A node can be deferred at a start and then report `loaded`; a node can
     report `loaded` twice. Two concurrent catch-ups would both send play."""
-    cond = Conductor.__new__(Conductor)
+    cond = bare
     cond.playing = _playback()
     node = Node("id", "twice")
     node.connected = True

@@ -19,9 +19,10 @@ import logging
 import math
 import statistics
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 from aiohttp import WSMsgType, web
 
@@ -128,10 +129,32 @@ PING_BOOST_MAX = 4.0    # ceiling on extra traffic for a node that discards a lo
 PING_JUDGE_MIN = 40     # samples before a node's survival rate means anything
 PING_INTERVAL_MIN = 0.5  # never spin the loop faster than this, whatever the boost
 
+# --- events: what the control page's toast used to forget --------------------
+# Everything notable the conductor does goes through `Conductor.event`: logged,
+# kept in a ring this long for a control page that opens late, pushed live to
+# the pages already open, toasted when it is worth interrupting for. Bounded,
+# and never part of the 1 Hz snapshot: a diagnostic must not be the reason the
+# page gets slow.
+EVENT_RING = 300
+EVENT_LEVELS = ("debug", "info", "warning")
+
 
 def now() -> float:
     """The conductor's reference clock (seconds). Everyone syncs to this."""
     return time.perf_counter()
+
+
+def _wall() -> str:
+    """Wall-clock HH:MM:SS.mmm - for lining an event up against what was heard,
+    and against the log, which stamps the same clock."""
+    t = time.time()
+    return time.strftime("%H:%M:%S", time.localtime(t)) + ".%03d" % int(t % 1 * 1000)
+
+
+def _mmss(ms: float) -> str:
+    """A position, the way the control page prints one."""
+    s = max(0, int(round(ms / 1000.0)))
+    return "%d:%02d" % (s // 60, s % 60)
 
 
 def _clean_eq(vals) -> List[float]:
@@ -524,6 +547,15 @@ class Node:
         # and None forever from a page too old to carry the stamp — which is
         # itself the answer to "has this one reloaded?".
         self.build: Optional[str] = None
+        # Source starts, counted against the playback they belong to: the
+        # `Playback` the last reported start was for, and how many starts after
+        # the first that playback has seen from this node. See the `state`
+        # handler for why the key is the object and not the track id.
+        self.run_playback: Optional[Playback] = None
+        self.restarts = 0
+        # Why the last `remember_skew` declined to bank, in one line, for the
+        # leave event. None when it banked, or had nothing to decide.
+        self.bank_note: Optional[str] = None
 
     def begin_session(self, ws: web.WebSocketResponse, ua: str) -> None:
         self.ws = ws
@@ -543,6 +575,8 @@ class Node:
         self.reset_err_stats()
         self.burst_until = 0.0
         self.mic = False  # mic mode is per page-life; the client re-announces it
+        self.run_playback = None
+        self.restarts = 0
         # The build stamped into the page this node actually loaded. Survives a
         # WebSocket reconnect, because the page did — which is the case a
         # connect-time check would wrongly call fresh.
@@ -565,46 +599,57 @@ class Node:
         Persistence only. The live model goes on using its fit either way — this
         decides what the node inherits *next* time, which is the value nobody is
         watching when it turns out to be wrong.
+
+        A refusal leaves its reason in `bank_note` rather than logging it here:
+        this also runs on every state save, and saying the same thing on each
+        nudge tweak was noise. The conductor reports it once, when the session
+        ends — which is when it matters.
         """
         est = self.model.estimate()
         if est is None or not est.skew_fitted:
+            self.bank_note = None
             return False
+        keeping = (
+            "nothing" if self.prior_skew is None
+            else f"{self.prior_skew * 1e6:.1f} ppm"
+        )
         if est.skew_saturated:
             # A clamped slope is not a fast crystal. The usual cause is a step
             # in the offset series - a phone that slept and woke - and banking
             # it would seed this node at the clamp for the ~30 s of its next
             # join before it has span to fit its own, walking `offset_at` at
             # 0.5 ms per second the whole time.
-            log.warning(
-                "%s: not banking %.1f ppm - the fit saturated (%.0f ppm clamp) "
-                "over %.0fs, %d samples; this is a step in the series, not a "
-                "crystal. Keeping %s",
-                self.name, est.skew_ppm, MAX_PERSISTED_SKEW * 1e6, est.span,
-                est.n_used,
-                "nothing" if self.prior_skew is None
-                else f"{self.prior_skew * 1e6:.1f} ppm",
+            self.bank_note = (
+                "not banking %.1f ppm - the fit saturated (%.0f ppm clamp) over "
+                "%.0fs, %d samples; this is a step in the series, not a crystal. "
+                "Keeping %s" % (
+                    est.skew_ppm, MAX_PERSISTED_SKEW * 1e6, est.span, est.n_used,
+                    keeping,
+                )
             )
             return False
         if not est.skew_credible_at(MIN_SKEW_SNR):
-            log.info(
-                "%s: not banking %.1f ppm - inside its own error bound "
-                "(+/-%.1f ppm over %.0fs, %d samples); keeping %s",
-                self.name, est.skew_ppm, est.skew_bound_ppm, est.span, est.n_used,
-                "nothing" if self.prior_skew is None
-                else f"{self.prior_skew * 1e6:.1f} ppm",
+            self.bank_note = (
+                "not banking %.1f ppm - inside its own error bound (+/-%.1f ppm "
+                "over %.0fs, %d samples); keeping %s" % (
+                    est.skew_ppm, est.skew_bound_ppm, est.span, est.n_used, keeping,
+                )
             )
             return False
+        self.bank_note = None
         self.prior_skew = est.skew
         return True
 
-    def end_session(self) -> None:
-        self.remember_skew()
+    def end_session(self) -> bool:
+        """Close the session. True if its drift was banked (see `remember_skew`)."""
+        banked = self.remember_skew()
         self.connected = False
         self.ws = None
         self.pending.clear()
         if self.ping_task:
             self.ping_task.cancel()
             self.ping_task = None
+        return banked
 
     async def send(self, payload: dict) -> None:
         if self.connected and self.ws is not None and not self.ws.closed:
@@ -791,6 +836,9 @@ class Node:
             # Which build of player.js this node actually loaded. `None` from a
             # page too old to report one, which is itself the answer.
             "playerBuild": self.build,
+            # Starts after the first for the current playback — re-anchors, in
+            # practice. The EVENTS card has each one with its time.
+            "restarts": self.restarts,
         }
         if est is not None:
             d.update(
@@ -818,6 +866,9 @@ class Conductor:
         self._build: Optional[str] = None
         self._build_key: Optional[Tuple[int, int]] = None
         self.control_sockets: Set[web.WebSocketResponse] = set()
+        # What happened, the most recent EVENT_RING of it, for a control page
+        # that opens after the fact. See `event`.
+        self.events: Deque[dict] = deque(maxlen=EVENT_RING)
         self.playing: Optional[Playback] = None
         self.paused: Optional[Playback] = None  # t_start meaningless; seek_ms is the position
         # Explicit play order layered over the folder scan. Track ids, duplicates
@@ -1011,11 +1062,25 @@ class Conductor:
                                 }
                             )
                 await self._steer_all()
-                # Drop mesh pairs that stopped reporting (channel died quietly).
-                stale = [k for k, seen in self.mesh_seen.items() if now() - seen > 90.0]
-                for k in stale:
-                    self.mesh_pairs.pop(k, None)
-                    self.mesh_seen.pop(k, None)
+                await self._reap_mesh()
+
+    async def _reap_mesh(self) -> None:
+        """Drop mesh pairs that stopped reporting (the channel died quietly).
+
+        Said at debug level: a pair that vanishes mid-evening is the raw
+        material of the mesh mystery, and it used to leave no trace.
+        """
+        stale = [k for k, seen in self.mesh_seen.items() if now() - seen > 90.0]
+        for k in stale:
+            self.mesh_pairs.pop(k, None)
+            self.mesh_seen.pop(k, None)
+            a, b = self.nodes.get(k[0]), self.nodes.get(k[1])
+            await self.event(
+                "mesh-lost",
+                "mesh pair %s <-> %s stopped reporting" % (
+                    a.name if a else k[0][-8:], b.name if b else k[1][-8:]),
+                level="debug", a=k[0], b=k[1],
+            )
 
     # --- state pushes -----------------------------------------------------------
 
@@ -1125,8 +1190,48 @@ class Conductor:
         await self._broadcast_control(self.snapshot())
 
     async def toast(self, text: str) -> None:
-        log.info("toast: %s", text)
-        await self._broadcast_control({"type": "toast", "text": text})
+        """The old one-line slot. Now also an event, so nothing said here is
+        forgotten 3.5 s later — every existing call site gets that for free."""
+        await self.event("toast", text, toast=True)
+
+    async def event(
+        self, kind: str, text: str, *, node: Optional[Node] = None,
+        level: str = "info", toast: bool = False, **fields,
+    ) -> dict:
+        """One line of what just happened, to every place it should reach.
+
+        Logged at `level`; appended to the ring, which is what a control page
+        opened late is handed; pushed live to every page already open; and
+        toasted if asked — the old 3.5 s slot, kept for the things worth
+        interrupting for. `fields` are the numbers: they ride the row untouched,
+        so a trace on disk can carry them without a second call site.
+
+        Nothing here awaits anything but the control sockets, and nothing here
+        asks a node for anything. Telemetry must not perturb the measurement.
+        """
+        if level not in EVENT_LEVELS:
+            level = "info"
+        row = {
+            "t": now(),
+            "wall": _wall(),
+            "kind": kind,
+            "level": level,
+            "node": None if node is None else node.client_id,
+            "name": None if node is None else node.name,
+            "text": text,
+        }
+        row.update(fields)
+        getattr(log, level)(
+            "%s%s: %s", kind, "" if node is None else " " + node.name, text
+        )
+        self.events.append(row)
+        await self._broadcast_control({"type": "event", **row})
+        if toast:
+            await self._broadcast_control({
+                "type": "toast",
+                "text": text if node is None else f"{node.name}: {text}",
+            })
+        return row
 
     # --- ping cadence -----------------------------------------------------------
 
@@ -1143,7 +1248,12 @@ class Conductor:
             # does — this is a response to conditions, not a label on a device.
             est = node.model.estimate()
             boost = ping_boost(est.n_used, est.n_samples) if est is not None else 1.0
-            self._note_boost(node, boost)
+            was = self._note_boost(node, boost)
+            if was is not None:
+                await self.event(
+                    "cadence", f"ping boost {was:.2f}x -> {boost:.2f}x",
+                    node=node, level="debug", fromBoost=was, toBoost=boost,
+                )
 
             await self._burst(node, boost_count(count, boost), spacing)
             interval = boost_interval(
@@ -1158,19 +1268,16 @@ class Conductor:
             except TimeoutError:
                 pass
 
-    def _note_boost(self, node: Node, boost: float) -> None:
-        """Record the live boost, and say so when it moves meaningfully.
+    def _note_boost(self, node: Node, boost: float) -> Optional[float]:
+        """Record the live boost; return the old one when it moved meaningfully.
 
-        Logged on a quarter-step so a node hovering at a threshold can't chatter,
-        but a link genuinely degrading or recovering leaves a trail you can read
-        against the sync numbers afterwards.
+        A quarter-step, so a node hovering at a threshold can't chatter, but a
+        link genuinely degrading or recovering leaves a trail you can read
+        against the sync numbers afterwards. None means nothing worth saying.
         """
-        if round(boost * 4) != round(node.ping_boost * 4):
-            log.info(
-                "cadence: %s ping boost %.2fx -> %.2fx", node.name,
-                node.ping_boost, boost,
-            )
+        was = node.ping_boost
         node.ping_boost = boost
+        return was if round(boost * 4) != round(was * 4) else None
 
     async def _burst(self, node: Node, count: int, spacing: float) -> None:
         for _ in range(count):
@@ -1239,6 +1346,15 @@ class Conductor:
             self.request_burst(ARM_SECONDS)
             for node in connected:
                 await self._send_arm(node, track)
+            await self.event(
+                "arm",
+                'arming "%s" - starting in %.1f s, %d node(s) still to load' % (
+                    track.title, ARM_SECONDS + PLAY_LEAD,
+                    sum(1 for n in connected if track.id not in n.loaded),
+                ),
+                track=track.id, secondsLeft=ARM_SECONDS + PLAY_LEAD,
+                nodes=[n.name for n in connected],
+            )
             await self.push_state()
 
         # Load gate: wait for every connected node to decode (or time out). When
@@ -1269,7 +1385,10 @@ class Conductor:
         ]
         if not ready:
             await self._disarm()
-            await self.toast(f'No node managed to load "{track.title}" - not starting.')
+            await self.event(
+                "noload", f'No node managed to load "{track.title}" - not starting.',
+                level="warning", toast=True, track=track.id,
+            )
             return
         # Say who we left behind. They are deferred, not dropped — `_catchup`
         # fires off their `loaded` message — but a speaker that starts a few
@@ -1279,10 +1398,10 @@ class Conductor:
                 if n.connected and track.id not in n.loaded]
         if late:
             names = ", ".join(n.name for n in late)
-            log.info('starting "%s" without %s - they catch up on decode',
-                     track.title, names)
-            await self.toast(
-                f"Starting without {names} - still loading, will join automatically."
+            await self.event(
+                "straggler",
+                f"Starting without {names} - still loading, will join automatically.",
+                toast=True, track=track.id, nodes=[n.name for n in late],
             )
 
         self.arming = None  # the play command below is what retires the countdown
@@ -1301,29 +1420,30 @@ class Conductor:
             # its clock is worth committing to. Say so, or a speaker that comes
             # in half a minute after the others looks like a fault.
             names = ", ".join(n.name for n in deferred)
-            log.info('starting "%s" without %s - clock still settling',
-                     track.title, names)
-            await self.toast(
-                f"Starting without {names} - clock still settling, will join automatically."
+            await self.event(
+                "defer",
+                f"Starting without {names} - clock still settling, will join automatically.",
+                toast=True, track=track.id, nodes=[n.name for n in deferred],
             )
             for node in deferred:
                 self._dispatch_catchup(node, track.id)
         if started:
-            log.info(
-                'play "%s" at T+%.1fs seek=%.0fms -> %s',
-                track.title, PLAY_LEAD, seek_ms, ", ".join(started),
+            await self.event(
+                "play",
+                'play "%s" at T+%.1fs from %s -> %s' % (
+                    track.title, PLAY_LEAD, _mmss(seek_ms), ", ".join(started)),
+                track=track.id, seekMs=seek_ms, leadS=PLAY_LEAD, nodes=started,
             )
         else:
             # Every ready node failed `_send_play`, i.e. not one of them has a
             # clock estimate yet. The no-load path above toasts; this one only
             # logged, so the single outcome that leaves `self.playing` set with
             # nothing sounding was also the one with no signal on the page.
-            log.warning(
-                'play "%s": no node could be timed - nothing started', track.title
-            )
-            await self.toast(
+            await self.event(
+                "nostart",
                 f'Could not start "{track.title}" - no node has a clock worth '
-                "timing from yet. They join automatically as their clocks settle."
+                "timing from yet. They join automatically as their clocks settle.",
+                level="warning", toast=True, track=track.id,
             )
         self._advance_task = asyncio.create_task(self._auto_advance(self.playing))
         # Get the *next* track decoding everywhere while this one plays.
@@ -1395,7 +1515,8 @@ class Conductor:
         reach `min_slope_span` and fit its own slope - polling `start_ready`
         rather than mere existence of an estimate. Joining a beat late but in
         time beats joining at once and as an echo."""
-        deadline = now() + CATCHUP_WAIT_S
+        t0 = now()
+        deadline = t0 + CATCHUP_WAIT_S
         while now() < deadline:
             p = self.playing
             if p is None or p.track.id != track_id or not node.connected:
@@ -1406,10 +1527,26 @@ class Conductor:
                     track=p.track, t_start=t_join, seek_ms=p.position_ms(t_join)
                 )
                 if await self._send_play(node, catch):
-                    log.info('catchup: %s into "%s" @ %.0fms',
-                             node.name, p.track.title, catch.seek_ms)
+                    await self.event(
+                        "catchup",
+                        'joined "%s" at %s after %.1f s' % (
+                            p.track.title, _mmss(catch.seek_ms), now() - t0),
+                        node=node, track=track_id, seekMs=catch.seek_ms,
+                        waitedS=now() - t0,
+                    )
                 return
             await asyncio.sleep(0.2)
+        # The deadline used to be silent. A speaker that will not play this
+        # track is the one outcome here that deserves a line on the page.
+        p = self.playing
+        if p is not None and p.track.id == track_id and node.connected:
+            await self.event(
+                "catchup-timeout",
+                'could not join "%s" - clock still not fit to time a start after '
+                "%.0f s; it sits this track out" % (p.track.title, CATCHUP_WAIT_S),
+                node=node, level="warning", toast=True, track=track_id,
+                waitedS=CATCHUP_WAIT_S,
+            )
 
     async def _auto_advance(self, p: Playback) -> None:
         """Ride the current track to its end, burst in the gap, start the next."""
@@ -1452,16 +1589,26 @@ class Conductor:
         self.paused = Playback(
             track=p.track, t_start=t_pause, seek_ms=max(0.0, p.position_ms(t_pause))
         )
-        log.info('paused "%s" at %.0fms', p.track.title, self.paused.seek_ms)
+        await self.event(
+            "pause", 'paused "%s" at %s' % (p.track.title, _mmss(self.paused.seek_ms)),
+            track=p.track.id, positionMs=self.paused.seek_ms,
+        )
         await self.push_state()
 
     async def _transport_stop(self) -> None:
+        cur = self.playing or self.paused
+        title = (
+            cur.track.title if cur is not None
+            else (self.arming[0].title if self.arming else None)
+        )
         self._cancel_advance()
         await self._disarm()
         self.playing = None
         self.paused = None
         self.target_track = None
         await self._broadcast_players({"type": "stop"})
+        if title is not None:  # a stop with nothing up is not an event
+            await self.event("stop", f'stopped "{title}"')
         await self.push_state()
 
     async def _transport_beep(self) -> None:
@@ -1741,6 +1888,8 @@ class Conductor:
         build = hello.get("build")
         build = None if build is None else str(build)[:32]
         node = self.nodes.get(client_id)
+        fresh = node is None
+        prev_build = None
         if node is None:
             node = Node(client_id, name)
             node.nudge_ms = self._state["nudges"].get(client_id, 0.0)
@@ -1750,21 +1899,35 @@ class Conductor:
             self.nodes[client_id] = node
         else:
             node.name = name
+            prev_build = node.build
             if node.ws is not None and not node.ws.closed:
                 await node.ws.close()  # stale socket from a previous page-life
             node.end_session()
         node.begin_session(ws, str(hello.get("ua", ""))[:120])
         node.mesh = supports_mesh
         node.build = build
-        self.note_build(node)
         self._drop_mesh_pairs_for(node.client_id)  # stale pairs from a past life
-        # Tail slice: date-based fallback ids all share the same *head*.
-        log.info(
-            "node joined: %s (~%s)%s%s", node.name, node.client_id[-8:],
-            " [mesh]" if node.mesh else "",
-            "" if node.prior_skew is None
-            else " [seeded %+.1f ppm]" % (node.prior_skew * 1e6),
+        # Tail slice: date-based fallback ids all share the same *head*. A known
+        # id is "back", not "joined" — but a socket reconnect and a page reload
+        # look the same from here, and only a build that changed proves the
+        # page itself was reloaded.
+        await self.event(
+            "join",
+            "%s (~%s)%s%s%s" % (
+                "joined" if fresh else (
+                    "back, reloaded" if build and prev_build and build != prev_build
+                    else "back"
+                ),
+                node.client_id[-8:],
+                "" if build is None else f" build {build}",
+                " [mesh]" if node.mesh else "",
+                "" if node.prior_skew is None
+                else " [seeded %+.1f ppm]" % (node.prior_skew * 1e6),
+            ),
+            node=node, fresh=fresh, build=build, mesh=node.mesh,
+            seededPpm=None if node.prior_skew is None else node.prior_skew * 1e6,
         )
+        await self.note_build(node)
 
         await node.send(
             {"type": "welcome", "nodeId": node.client_id, "name": node.name,
@@ -1791,13 +1954,28 @@ class Conductor:
                 await self._on_player_msg(node, data, t3)
         finally:
             if node.ws is ws:
-                node.end_session()  # banks this session's fitted skew
-                self._save_state()  # ...and gets it onto disk while we know it
-                self._drop_mesh_pairs_for(node.client_id)
-                log.info("node left: %s", node.name)
-                await self._push_mesh_roster()
-                await self.push_state()
+                await self._node_left(node)
         return ws
+
+    async def _node_left(self, node: Node) -> None:
+        """Close out a session whose socket is gone, and say what it left behind."""
+        banked = node.end_session()  # banks this session's fitted skew
+        self._save_state()  # ...and gets it onto disk while we know it
+        self._drop_mesh_pairs_for(node.client_id)
+        await self.event("leave", "left", node=node)
+        # What it carries into its next session, or why nothing new. The
+        # refusal reasons are what found the saturated-fit bug; they belong
+        # on the page, not only in a scrollback.
+        if banked:
+            await self.event(
+                "drift-banked",
+                "banked %+.1f ppm for its next session" % (node.prior_skew * 1e6),
+                node=node, skewPpm=node.prior_skew * 1e6,
+            )
+        elif node.bank_note:
+            await self.event("drift-refused", node.bank_note, node=node)
+        await self._push_mesh_roster()
+        await self.push_state()
 
     async def _on_player_msg(self, node: Node, data: dict, t3: float) -> None:
         kind = data.get("type")
@@ -1896,16 +2074,14 @@ class Conductor:
             # short or truncated decode is the one worth chasing.
             seek = _clean_pos_ms(data.get("seekMs"))
             dur = _clean_pos_ms(data.get("durationMs"))
-            log.warning(
-                "%s: refused a start at %s into a %s buffer (track %s)",
-                node.name,
-                "?" if seek is None else f"{seek / 1000.0:.2f}s",
-                "?" if dur is None else f"{dur / 1000.0:.2f}s",
-                str(data.get("trackId"))[:12],
-            )
-            await self.toast(
-                f"{node.name}: refused a start past the end of its buffer "
-                "- it kept playing what it had"
+            await self.event(
+                "startRefused",
+                "refused a start at %s into a %s buffer - it kept playing what it had" % (
+                    "?" if seek is None else f"{seek / 1000.0:.2f}s",
+                    "?" if dur is None else f"{dur / 1000.0:.2f}s",
+                ),
+                node=node, level="warning", toast=True,
+                track=str(data.get("trackId"))[:12], seekMs=seek, durationMs=dur,
             )
         elif kind == "loadError":
             # A failed load must retire the whole pill, not just its timer.
@@ -1922,8 +2098,12 @@ class Conductor:
                         {"type": "loadProgress", "nodeId": node.client_id,
                          "done": True, "failed": True}
                     )
-            await self.toast(
-                f"{node.name} failed to decode {data.get('trackId')}: {data.get('error')}"
+            await self.event(
+                "loadError",
+                "failed to decode %s: %s" % (
+                    str(data.get("trackId"))[:12], str(data.get("error"))[:160]),
+                node=node, level="warning", toast=True,
+                track=str(data.get("trackId"))[:12],
             )
         elif kind == "meshSignal":
             # Dumb relay: offers/answers/ICE between two nodes.
@@ -1951,9 +2131,17 @@ class Conductor:
                             t3=float(data["t3"]) / 1000.0,
                         )
                     )
+                    seen_before = key in self.mesh_seen
                     self.mesh_seen[key] = now()
                 except (KeyError, ValueError, TypeError):
-                    pass
+                    return
+                if not seen_before:
+                    # First usable sample for this pair — or the first since
+                    # the pulse reaped it, which is the pairing worth reading.
+                    await self.event(
+                        "mesh-up", f"mesh pair up with {self.nodes[peer].name}",
+                        node=node, level="debug", peer=peer,
+                    )
         elif kind == "steerAck":
             err = _clean_err_ms(data.get("errMs"))
             if err is not None:
@@ -1981,6 +2169,25 @@ class Conductor:
                 # restart, a seek and a catch-up all reuse the same trackId.
                 node.run_since = now()
                 node.reset_err_stats()
+                # Count it against the playback it belongs to. The first start
+                # a node reports for a `Playback` is the one the conductor asked
+                # for (a play, or a catch-up); every one after it is a restart
+                # the node decided on by itself — a re-anchor — and those are
+                # the transitions that get heard. Keyed to the object, not the
+                # track id, so a seek (a new Playback of the same track) resets
+                # the count and a re-anchor does not.
+                p = self.playing
+                track = str(node.playing_track)[:12]
+                if p is not None and node.run_playback is p:
+                    node.restarts += 1
+                    await self.event(
+                        "restart", f"source restarted (#{node.restarts} this track)",
+                        node=node, level="warning", restarts=node.restarts, track=track,
+                    )
+                else:
+                    node.run_playback = p
+                    node.restarts = 0
+                    await self.event("start", "source started", node=node, track=track)
         elif kind == "spectrum":
             # Cosmetic per-node level meter, relayed straight to any open control
             # page — never stored, never touches timing. Clamp hard: client data.
@@ -2046,6 +2253,9 @@ class Conductor:
         self.control_sockets.add(ws)
         try:
             await ws.send_str(json.dumps(self.snapshot()))
+            # The evening so far, once. Never in the snapshot: that would be
+            # the whole ring to every open page, every second.
+            await ws.send_str(json.dumps({"type": "events", "items": list(self.events)}))
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
                     continue
@@ -2188,7 +2398,12 @@ class Conductor:
             if not 0 <= i < len(self.queue):
                 return
             if cmd == "unqueue":
-                self.queue.pop(i)
+                gone = self.tracks_by_id.get(self.queue.pop(i))
+                await self.event(
+                    "queue",
+                    'removed #%d "%s" from the queue' % (i + 1, gone.title if gone else "?"),
+                    level="debug",
+                )
             else:
                 try:
                     j = i + int(data.get("delta", 0))
@@ -2197,6 +2412,12 @@ class Conductor:
                 if not 0 <= j < len(self.queue) or i == j:
                     return
                 self.queue[i], self.queue[j] = self.queue[j], self.queue[i]
+                moved = self.tracks_by_id.get(self.queue[j])
+                await self.event(
+                    "queue",
+                    'moved "%s" to #%d' % (moved.title if moved else "?", j + 1),
+                    level="debug",
+                )
             await self._prefetch_next()
             await self.push_state()
         elif cmd == "queueClear":
@@ -2213,21 +2434,23 @@ class Conductor:
 
     # --- http handlers -------------------------------------------------------------
 
-    def note_build(self, node: Node) -> bool:
+    async def note_build(self, node: Node) -> bool:
         """Is this node running something other than what we are serving?
 
-        Returns True when it is, and says so in the log — the control page marks
-        it too, but the log is what you still have an hour later. Silent when
-        the node reports no build at all: that is a page served before the stamp
-        existed, and there is nothing to compare it against.
+        Returns True when it is, and says so — in the log, and as a warning
+        event, so the page keeps it past the moment of the join. The ⟳ beside
+        the node's name shows the current state; this records when it began.
+        Silent when the node reports no build at all: that is a page served
+        before the stamp existed, and there is nothing to compare it against.
         """
         serving = self.player_build()
         if not node.build or not serving or node.build == serving:
             return False
-        log.warning(
-            "%s is running player build %s while %s is being served - it has "
-            "not reloaded since player.js changed",
-            node.name, node.build, serving,
+        await self.event(
+            "stale-build",
+            f"running player build {node.build} while {serving} is being served "
+            "- it has not reloaded since player.js changed",
+            node=node, level="warning", build=node.build, serving=serving,
         )
         return True
 

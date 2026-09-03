@@ -123,6 +123,16 @@
   .nextUp { color: var(--accent); font-size: .68rem; letter-spacing: .08em; margin-left: 8px; }
   #queueHead { display: flex; align-items: center; gap: 10px; }
   tr.qNext td { color: var(--accent); }
+  /* events: what the toast used to forget */
+  #eventsHead { display: flex; align-items: center; gap: 10px; }
+  #eventsWrap { max-height: 300px; overflow-y: auto; }
+  td.evT { color: var(--dim); width: 80px; }
+  td.evN { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+  td.evX { white-space: normal; }
+  .evK { color: var(--dim); font-size: .62rem; letter-spacing: .06em; margin-left: 6px; }
+  tr.evDim td { color: var(--dim); }
+  tr.evWarn td { color: var(--warn); }
+  tr.evBad td { color: var(--bad); }
   #toast {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
     background: var(--card); border: 1px solid var(--warn); color: var(--text);
@@ -167,6 +177,15 @@
       <tbody id="nodeRows"></tbody>
     </table>
     <div class="empty" id="nodesEmpty">no nodes yet — open <b id="playerUrl"></b> on each device and tap JOIN</div>
+  </div>
+
+  <h2 id="eventsHead">
+    <span>EVENTS <span class="pill" id="evCount">newest first</span></span>
+    <button id="btnEventsClear" class="qBtn" title="clear this page's view — the conductor keeps its own ring">clear</button>
+  </h2>
+  <div class="card" id="eventsWrap">
+    <table><tbody id="eventRows"></tbody></table>
+    <div class="empty" id="eventsEmpty">nothing yet — joins, starts, restarts and every toast land here and stay</div>
   </div>
 
   <h2>SPECTRUM <span class="pill">live output level per node — an internal tap, not a mic</span></h2>
