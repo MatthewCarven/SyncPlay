@@ -125,6 +125,8 @@
   .nextUp { color: var(--accent); font-size: .68rem; letter-spacing: .08em; margin-left: 8px; }
   #queueHead { display: flex; align-items: center; gap: 10px; }
   tr.qNext td { color: var(--accent); }
+  tr.stopRow td { color: var(--dim); font-style: italic; }
+  tr.stopRow.qNext td { color: var(--accent); }
   /* events: what the toast used to forget */
   #eventsHead { display: flex; align-items: center; gap: 10px; }
   #eventsWrap { max-height: 300px; overflow-y: auto; }
@@ -250,7 +252,7 @@
   </h2>
   <div class="card" style="overflow-x:auto">
     <table><tbody id="queueRows"></tbody></table>
-    <div class="empty" id="queueEmpty">queue empty — hit <b>＋queue</b> on any track below to pick what plays next</div>
+    <div class="empty" id="queueEmpty">queue empty — hit <b>＋queue</b> on any track below to pick what plays next; <b>■ stop</b> at the bottom halts playback between parts</div>
   </div>
 
   <h2>PLAYLIST</h2>

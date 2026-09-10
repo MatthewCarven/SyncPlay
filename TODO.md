@@ -6,6 +6,18 @@ the player audio path only when unavoidable, one commit per feature so
 `git revert` is always an exit.
 
 ## Done
+- [x] **A stop marker in the queue** (2026-09-11) — the playlist's virtual
+  last row, **■ stop**, queues `STOP_ID` (`"stop"`, four chars, can't collide
+  with a 10-hex track id). `_queue_head` is the one place that knows which
+  entries still mean something; `_peek_next` answers None at a marker (so no
+  prefetch, and `nextUp` says `"stop"` — the virtual row shows *next up*),
+  `_take_next` spends it and answers None, and auto-advance then halts with a
+  `stop` event ("… at the queue stop marker - N still queued"). ⏭ into a
+  marker stops early. From a standstill ▶/⏭ look *past* a leading marker —
+  stopped is where we already are. Survives rescan; edits by index as before.
+  8 tests in `tests/test_queue.py` (the stub dispatch now records a stop as
+  `<stop>`; test tracks get a `duration_ms`, or `_auto_advance` waits forever
+  for a node that never comes). Verified live on a throwaway :8931.
 - [x] **A start needs a clock worth committing to** (2026-09-02) — the only bar
   was that an estimate *existed*. A freshly reconnected tablet met it with ~25
   samples, was committed to a start at a track change, and ran a minute at mean

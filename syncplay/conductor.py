@@ -69,6 +69,9 @@ PENDING_PING_TTL = 5.0
 MIN_JOIN_SAMPLES = 8
 CATCHUP_WAIT_S = 35.0     # long enough for a young model to fit its own slope
 MAX_QUEUE = 200           # sanity cap on the explicit play queue
+# A queue entry that isn't a track: play up to here, then stop and wait for ▶.
+# Four chars, so it can never collide with a 10-hex track id.
+STOP_ID = "stop"
 MAX_PERSISTED_SKEW = 500e-6  # 500 ppm; past this it's a bad fit, not a crystal
 # How far a fitted slope must clear its own worst-case error before we are
 # willing to carry it into the node's *next* session. 2x is deliberately modest:
@@ -960,6 +963,8 @@ class Conductor:
         # Explicit play order layered over the folder scan. Track ids, duplicates
         # allowed (queue the same song twice if you like), consumed from the head
         # by auto-advance/next; when it empties we fall back to folder order.
+        # STOP_ID may sit anywhere in it: reaching it halts playback, consumes
+        # the marker, and leaves the rest of the queue ready for ▶.
         # Deliberately not persisted: a queue is a mood, not a setting.
         self.queue: List[str] = []
         self.target_track: Optional[Track] = None  # track we're bringing up now (gates download-% relay)
@@ -997,7 +1002,9 @@ class Conductor:
         self.tracks = tracks
         self.tracks_by_id = {t.id: t for t in tracks}
         # A rescan can retire files out from under the queue; forget those ids.
-        self.queue = [tid for tid in self.queue if tid in self.tracks_by_id]
+        self.queue = [
+            tid for tid in self.queue if tid == STOP_ID or tid in self.tracks_by_id
+        ]
         log.info("library: %d track(s) in %s", len(tracks), self.music_dir)
         return len(tracks)
 
@@ -1010,44 +1017,70 @@ class Conductor:
             return self.tracks[0]
         return self.tracks[(i + 1) % len(self.tracks)]
 
+    def _queue_head(self) -> Optional[str]:
+        """The first queue entry that still means something: a track id or STOP_ID."""
+        for tid in self.queue:
+            if tid == STOP_ID or tid in self.tracks_by_id:
+                return tid
+        return None
+
+    def _queue_title(self, tid: str) -> str:
+        if tid == STOP_ID:
+            return "stop"
+        t = self.tracks_by_id.get(tid)
+        return t.title if t else "?"
+
     def _peek_next(self, current: Track) -> Optional[Track]:
         """What plays after `current` — queue head if any, else folder order.
 
+        None when the head is a stop marker: nothing plays next, by request.
         Non-consuming: this is what the prefetch and the control page's "next up"
         marker ask, and asking must never change the answer.
         """
-        for tid in self.queue:
-            t = self.tracks_by_id.get(tid)
-            if t is not None:
-                return t
+        head = self._queue_head()
+        if head == STOP_ID:
+            return None
+        if head is not None:
+            return self.tracks_by_id[head]
         return self._folder_next(current)
 
     def _take_next(self, current: Track) -> Optional[Track]:
         """Same choice as _peek_next, but consumes the queue entry it used.
 
+        A stop marker at the head is consumed too, and answers None: the caller
+        halts, and the queue behind the marker is left intact for ▶.
         Only the two places that genuinely move on to the next song call this:
         auto-advance at end of track, and the control page's ⏭ next.
         """
         while self.queue:
             tid = self.queue.pop(0)
+            if tid == STOP_ID:
+                return None
             t = self.tracks_by_id.get(tid)
             if t is not None:
                 return t
         return self._folder_next(current)
 
     def _next_up_id(self) -> Optional[str]:
-        """Track id that would play next right now. Display only, never consumes."""
+        """Track id that would play next right now — or STOP_ID when a stop
+        marker is what comes next. Display only, never consumes."""
         cur = self.playing or self.paused
         if cur is not None:
+            if self._queue_head() == STOP_ID:
+                return STOP_ID
             nxt = self._peek_next(cur.track)
             return nxt.id if nxt else None
+        # From a standstill a stop marker is already satisfied: look past it.
         for tid in self.queue:
             if tid in self.tracks_by_id:
                 return tid
         return self.tracks[0].id if self.tracks else None
 
     def _take_next_idle(self) -> Optional[Track]:
-        """What ▶/⏭ start from a standstill: queue head, else the library top."""
+        """What ▶/⏭ start from a standstill: queue head, else the library top.
+
+        Stop markers on the way are spent — stopped is where we already are.
+        """
         while self.queue:
             t = self.tracks_by_id.get(self.queue.pop(0))
             if t is not None:
@@ -1221,11 +1254,8 @@ class Conductor:
                 {"id": t.id, "title": t.title, "durationMs": t.duration_ms}
                 for t in self.tracks
             ],
-            "queue": [
-                {"id": t.id, "title": t.title, "durationMs": t.duration_ms}
-                for t in (self.tracks_by_id.get(q) for q in self.queue)
-                if t is not None
-            ],
+            # Same length and order as self.queue: the page edits by index.
+            "queue": [self._queue_entry(q) for q in self.queue],
             "arming": (
                 {
                     "trackId": self.arming[0].id,
@@ -1246,6 +1276,14 @@ class Conductor:
             # to say. A half-reloaded fleet used to be invisible.
             "servingBuild": self.player_build(),
         }
+
+    def _queue_entry(self, tid: str) -> dict:
+        if tid == STOP_ID:
+            return {"id": STOP_ID, "title": "stop", "durationMs": None, "stop": True}
+        t = self.tracks_by_id.get(tid)
+        if t is None:  # scan_tracks prunes retired ids; keep the index aligned anyway
+            return {"id": tid, "title": "?", "durationMs": None}
+        return {"id": t.id, "title": t.title, "durationMs": t.duration_ms}
 
     def _mesh_snapshot(self) -> List[dict]:
         """Triangle closure per measured pair: direct(A<->B) minus star-implied.
@@ -1708,9 +1746,18 @@ class Conductor:
             await asyncio.sleep(delay)
         if self.playing is not p:
             return
-        nxt = self._take_next(p.track)
+        halt = self._queue_head() == STOP_ID
+        nxt = self._take_next(p.track)  # spends the stop marker, if that's the head
         if nxt is None:
             self.playing = None
+            self.target_track = None
+            if halt:
+                await self.event(
+                    "stop",
+                    'stopped after "%s" at the queue stop marker - %d still queued'
+                    % (p.track.title, len(self.queue)),
+                    track=p.track.id, queued=len(self.queue),
+                )
             await self.push_state()
             return
         self.dispatch(self._transport_play(nxt, why="auto"))
@@ -2537,11 +2584,16 @@ class Conductor:
                 self.dispatch(self._transport_play(cur.track, pos, why="seek"))
         elif cmd == "next":
             current = (self.playing or self.paused)
-            if current is not None:
-                nxt = self._take_next(current.track)
-            else:
+            if current is None:
                 # Nothing playing: ⏭ starts the queue head, or the library top.
                 nxt = self._take_next_idle()
+            elif self._queue_head() == STOP_ID:
+                # ⏭ into a stop marker is the marker doing its job, early.
+                self._take_next(current.track)
+                nxt = None
+                self.dispatch(self._transport_stop())
+            else:
+                nxt = self._take_next(current.track)
             if nxt:
                 self.dispatch(self._transport_play(nxt, why="next"))
         elif cmd == "stop":
@@ -2615,14 +2667,21 @@ class Conductor:
         elif cmd == "queue":
             # Append. Duplicates are allowed on purpose — queueing a song twice
             # is a legitimate request, and index-based edits handle the ambiguity.
-            track = self.tracks_by_id.get(str(data.get("trackId")))
-            if track is not None and len(self.queue) < MAX_QUEUE:
-                self.queue.append(track.id)
-                await self.toast(f'Queued "{track.title}" (#{len(self.queue)}).')
-                await self._prefetch_next()
-                await self.push_state()
-            elif track is not None:
+            # STOP_ID is the playlist's virtual last row: a marker, not a track.
+            tid = str(data.get("trackId"))
+            track = self.tracks_by_id.get(tid)
+            if tid != STOP_ID and track is None:
+                return
+            if len(self.queue) >= MAX_QUEUE:
                 await self.toast(f"Queue is full ({MAX_QUEUE}).")
+                return
+            self.queue.append(tid)
+            if track is None:
+                await self.toast(f"Queued a stop (#{len(self.queue)}) - playback halts there.")
+            else:
+                await self.toast(f'Queued "{track.title}" (#{len(self.queue)}).')
+            await self._prefetch_next()
+            await self.push_state()
         elif cmd in ("unqueue", "queueMove"):
             # Both edit by index, not id: with duplicates allowed, position is
             # the only unambiguous handle on a queue entry.
@@ -2633,10 +2692,10 @@ class Conductor:
             if not 0 <= i < len(self.queue):
                 return
             if cmd == "unqueue":
-                gone = self.tracks_by_id.get(self.queue.pop(i))
+                gone = self._queue_title(self.queue.pop(i))
                 await self.event(
                     "queue",
-                    'removed #%d "%s" from the queue' % (i + 1, gone.title if gone else "?"),
+                    'removed #%d "%s" from the queue' % (i + 1, gone),
                     level="debug",
                 )
             else:
@@ -2647,10 +2706,9 @@ class Conductor:
                 if not 0 <= j < len(self.queue) or i == j:
                     return
                 self.queue[i], self.queue[j] = self.queue[j], self.queue[i]
-                moved = self.tracks_by_id.get(self.queue[j])
                 await self.event(
                     "queue",
-                    'moved "%s" to #%d' % (moved.title if moved else "?", j + 1),
+                    'moved "%s" to #%d' % (self._queue_title(self.queue[j]), j + 1),
                     level="debug",
                 )
             await self._prefetch_next()

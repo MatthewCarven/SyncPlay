@@ -11,7 +11,7 @@ import wave
 
 import pytest
 
-from syncplay.conductor import Conductor, Playback, now
+from syncplay.conductor import STOP_ID, Conductor, Playback, now
 
 
 @pytest.fixture()
@@ -33,7 +33,9 @@ def c(lib):
     cond.picked = []
 
     def stub_dispatch(coro):
-        cond.picked.append(coro.cr_frame.f_locals["track"].title)
+        # A play carries its track; a stop carries nothing, and is recorded as such.
+        track = coro.cr_frame.f_locals.get("track")
+        cond.picked.append(track.title if track is not None else "<stop>")
         coro.close()  # never actually schedule playback
 
     cond.dispatch = stub_dispatch
@@ -42,7 +44,7 @@ def c(lib):
 
 
 def titles(cond):
-    return [cond.tracks_by_id[q].title for q in cond.queue]
+    return [cond._queue_title(q) for q in cond.queue]
 
 
 def send(cond, **cmd):
@@ -149,3 +151,103 @@ def test_empty_queue_behaves_exactly_like_before_the_queue_existed(c):
         assert c._peek_next(t).id == expected.id
         assert c._take_next(t).id == expected.id
         assert c.queue == []
+
+
+# --- the stop marker ---------------------------------------------------------
+#
+# A queue entry that isn't a track: reaching it halts playback, spends the
+# marker, and leaves whatever follows at the head for ▶.
+
+
+def playing(cond, title):
+    track = cond.tracks_by_id[cond.ids[title]]
+    track.duration_ms = 100.0  # normally the first node to decode it says; here nobody does
+    cond.playing = Playback(track=track, t_start=now(), seek_ms=0.0)
+    return cond.playing
+
+
+def test_stop_marker_queues_like_a_track(c):
+    send(c, cmd="queue", trackId=c.ids["b"])
+    send(c, cmd="queue", trackId=STOP_ID)
+    send(c, cmd="queue", trackId=c.ids["c"])
+    assert titles(c) == ["b", "stop", "c"]
+    snap = c.snapshot()["queue"]
+    assert [q["title"] for q in snap] == ["b", "stop", "c"]
+    assert snap[1] == {"id": STOP_ID, "title": "stop", "durationMs": None, "stop": True}
+    assert "stop" not in snap[0] and "stop" not in snap[2]
+    # Index-addressed edits see the marker as one more entry.
+    send(c, cmd="queueMove", index=1, delta=1)
+    assert titles(c) == ["b", "c", "stop"]
+    send(c, cmd="unqueue", index=2)
+    assert titles(c) == ["b", "c"]
+
+
+def test_peek_sees_nothing_past_a_stop_marker(c):
+    """Prefetch and the 'next up' marker must not look through the stop."""
+    send(c, cmd="queue", trackId=STOP_ID)
+    send(c, cmd="queue", trackId=c.ids["d"])
+    a = playing(c, "a")
+    assert c._peek_next(a.track) is None
+    assert c.snapshot()["nextUp"] == STOP_ID
+    assert titles(c) == ["stop", "d"]  # asking consumed nothing
+
+
+def test_take_spends_the_marker_and_keeps_the_rest(c):
+    send(c, cmd="queue", trackId=STOP_ID)
+    send(c, cmd="queue", trackId=c.ids["d"])
+    a = playing(c, "a")
+    assert c._take_next(a.track) is None
+    assert titles(c) == ["d"]
+    assert c._take_next(a.track).title == "d"
+    assert c.queue == []
+
+
+def test_auto_advance_halts_at_the_marker_and_holds_the_queue(c):
+    send(c, cmd="queue", trackId=STOP_ID)
+    send(c, cmd="queue", trackId=c.ids["d"])
+    p = playing(c, "a")
+    p.t_start = now() - 60.0  # the track ended long ago: no sleeping
+    asyncio.run(c._auto_advance(p))
+    assert c.playing is None and c.picked == []  # nothing started
+    assert titles(c) == ["d"]
+    assert c.events[-1]["kind"] == "stop" and c.events[-1]["queued"] == 1
+    # ...and ▶ from the standstill starts the rest of the queue.
+    send(c, cmd="play")
+    assert c.picked[-1] == "d" and c.queue == []
+
+
+def test_auto_advance_without_a_marker_still_plays_on(c):
+    send(c, cmd="queue", trackId=c.ids["d"])
+    p = playing(c, "a")
+    p.t_start = now() - 60.0
+    asyncio.run(c._auto_advance(p))
+    assert c.picked == ["d"] and c.queue == []
+
+
+def test_next_into_a_marker_stops_early(c):
+    send(c, cmd="queue", trackId=STOP_ID)
+    send(c, cmd="queue", trackId=c.ids["d"])
+    playing(c, "a")
+    send(c, cmd="next")
+    assert c.picked[-1] == "<stop>"
+    assert titles(c) == ["d"]
+
+
+def test_marker_at_a_standstill_is_already_satisfied(c):
+    """Stopped is where we are: ▶/⏭ from idle look past a leading marker."""
+    send(c, cmd="queue", trackId=STOP_ID)
+    send(c, cmd="queue", trackId=c.ids["c"])
+    assert c.snapshot()["nextUp"] == c.ids["c"]
+    send(c, cmd="next")
+    assert c.picked[-1] == "c" and c.queue == []
+    send(c, cmd="queue", trackId=STOP_ID)
+    send(c, cmd="play")  # a lone marker: spent, library top plays
+    assert c.picked[-1] == "a" and c.queue == []
+
+
+def test_marker_survives_a_rescan(c, lib):
+    send(c, cmd="queue", trackId=c.ids["d"])
+    send(c, cmd="queue", trackId=STOP_ID)
+    (lib / "d.wav").unlink()
+    send(c, cmd="rescan")
+    assert titles(c) == ["stop"]

@@ -313,7 +313,7 @@ function renderPlaylist() {
   for (const q of snap.queue || []) queued.set(q.id, (queued.get(q.id) || 0) + 1);
   const nextUp = snap.nextUp || null;
 
-  $("trackRows").innerHTML = snap.tracks.map((t) => {
+  const rows = snap.tracks.map((t) => {
     const n = queued.get(t.id) || 0;
     const mark = t.id === nowId ? "♪ " : "";
     // "next up" only earns the label when it isn't the one already playing.
@@ -327,7 +327,23 @@ function renderPlaylist() {
             onclick="queueTrack('${t.id}')">＋queue</button></td>
       <td class="num"><button class="playBtn" onclick="playTrack('${t.id}')">play</button></td>
     </tr>`;
-  }).join("");
+  });
+  // The virtual last row: not a file, a marker. Queue it between two parts of
+  // a set and playback halts there, spends the marker, and waits for ▶ to
+  // start the rest. Only shown when there's a library to break up.
+  if (snap.tracks.length) {
+    const n = queued.get(STOP_ID) || 0;
+    const tag = nextUp === STOP_ID ? ` <span class="nextUp">next up</span>` : "";
+    const qTag = n ? ` <span class="pill">· queued${n > 1 ? "×" + n : ""}</span>` : "";
+    rows.push(`<tr class="trackRow stopRow">
+      <td>■ stop <span class="pill">playback halts here — ▶ resumes the queue</span>${tag}${qTag}</td>
+      <td class="num"></td>
+      <td class="num"><button class="qBtn" title="queue a stop: the fleet goes quiet at this point and waits for ▶"
+            onclick="queueTrack('${STOP_ID}')">＋queue</button></td>
+      <td class="num"></td>
+    </tr>`);
+  }
+  $("trackRows").innerHTML = rows.join("");
   $("tracksEmpty").textContent = snap.tracks.length ? "" :
     `no audio files found in ${snap.musicDir} — drop some in and hit ↻ rescan`;
   $("tracksEmpty").style.display = snap.tracks.length ? "none" : "block";
@@ -340,9 +356,9 @@ function renderPlaylist() {
 function renderQueue() {
   const q = snap.queue || [];
   $("queueRows").innerHTML = q.map((t, i) => `
-    <tr class="${i === 0 ? "qNext" : ""}">
+    <tr class="${i === 0 ? "qNext" : ""}${t.stop ? " stopRow" : ""}">
       <td class="qPos num">${i + 1}</td>
-      <td class="qTitle">${i === 0 ? "▸ " : ""}${esc(t.title)}</td>
+      <td class="qTitle">${i === 0 ? "▸ " : ""}${t.stop ? "■ stop" : esc(t.title)}</td>
       <td class="num">${t.durationMs ? mmss(t.durationMs) : ""}</td>
       <td class="num">
         <button class="qBtn" title="move up" ${i === 0 ? "disabled" : ""}
@@ -706,6 +722,8 @@ function setNodePill(nodeId, pct, done, decoding) {
 }
 
 window.playTrack = (trackId) => cmd({ cmd: "play", trackId });
+// The queue's non-track entry; must match the conductor's STOP_ID.
+const STOP_ID = "stop";
 window.queueTrack = (trackId) => cmd({ cmd: "queue", trackId });
 window.unqueue = (index) => cmd({ cmd: "unqueue", index });
 window.moveQueue = (index, delta) => cmd({ cmd: "queueMove", index, delta });

@@ -2317,3 +2317,50 @@ steady `mapMs` of 24117.6 ms across the acks.
 page needs a reload after the conductor restart, and the ⟳ column says which
 have not. Old pages ignore `notice` and `why` and report no cause, which
 reads as `unknown` — a half-reloaded fleet is safe, just quieter.
+
+## 2026-09-11 — a stop marker in the queue
+
+**Ask.** One more row at the bottom of the playlist: a virtual **stop** item
+that, queued, halts playback at that point, removes itself, and leaves the
+rest of the queue ready for ▶.
+
+**Shape.** The queue already held track ids with duplicates allowed and
+index-addressed edits, so the marker is just one more id: `STOP_ID = "stop"`
+(four chars; track ids are ten hex). One helper, `_queue_head`, says what the
+first meaningful entry is — a track id, `STOP_ID`, or nothing — and the three
+readers sit on it: `_peek_next` returns None at a marker (nothing prefetched
+past it, and `nextUp` carries `"stop"` so the virtual row can wear the *next
+up* tag); `_take_next` pops the marker and returns None; `_take_next_idle`
+skips markers, because a stop reached from a standstill is already satisfied.
+Auto-advance checks the head before taking, so a None it caused is logged as
+a `stop` event with the count still queued — a None from an empty library
+stays silent as before. ⏭ into a marker spends it and dispatches
+`_transport_stop`. The snapshot's `queue` is now built by `_queue_entry`,
+same length and order as `self.queue` (the page edits by index); a marker
+entry carries `stop: true` and no duration. Toasts/events name it "stop"
+through `_queue_title`.
+
+**Control page.** `renderPlaylist` pushes a `stopRow` after the library
+(only when there is a library), dim italic, with the same ＋queue button and
+the queued×N pill; `renderQueue` renders a `stop` entry as "■ stop" with
+↑/↓/✕ like any other. `STOP_ID` is mirrored as a const in `control.js`.
+Additive — an old page against the new conductor just shows a queue entry
+titled "stop".
+
+**Verified.** 8 new tests in `tests/test_queue.py` — queues like a track,
+edits by index, snapshot shape, peek sees nothing past it, take spends it and
+keeps the rest, auto-advance halts + holds + events, no-marker auto-advance
+unchanged, ⏭ stops early, idle looks past it, survives rescan — 371 pass.
+Lesson: a `Playback` in a test needs `duration_ms` set, or `_auto_advance`
+loops on `sleep(0.3)` waiting for the node that decodes it (the first run
+hung for 120 s). `node --check` on `control.js`. Live on a throwaway :8931
+(the fleet was up on :8927, left alone): queued a song, the stop, a song;
+played the song with a dev node joined — `nextUp` read `"stop"` and the
+virtual row said *next up*; sought to 4 s from the end; the EVENTS card
+logged `stopped after "02 - Out Of Time" at the queue stop marker - 1 still
+queued`, `playing` null, queue `["08. Dr. Ford"]`; a bare ▶ then armed
+"08. Dr. Ford" and emptied the queue. No console errors. The pane's
+screenshot capture came back blank, so the proof is the DOM reads.
+
+**Adopting it.** Conductor restart on :8927 plus a control-page reload;
+`player.js` untouched, so the nodes need nothing.

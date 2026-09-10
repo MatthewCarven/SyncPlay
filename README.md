@@ -125,6 +125,9 @@ flam — then play something.
   falls back to folder order. Queueing the same track twice is allowed. Playing
   a track explicitly is an override — it doesn't touch the queue. Whatever's
   next (queued or not) is prefetched to every node while the current song plays.
+  The playlist's last row, **■ stop**, is a marker rather than a file: queue
+  it between two parts of a set and playback halts there, the marker is
+  spent, and ▶ starts whatever follows. Nothing is prefetched past it.
 - A per-node **output EQ** (5 bands, ±12 dB) on the control page shapes each
   device's tone — pushed live, persisted, and bypassed by the beep. Additive to
   the audio path; it shifts timbre, not sync (the servo runs upstream of it).
