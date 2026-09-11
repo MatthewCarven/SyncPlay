@@ -188,7 +188,8 @@ the player audio path only when unavoidable, one commit per feature so
 
 ## Next candidates
 
-- [ ] **From the 2026-09-11 bring-up capture** (WORKLOG, evening entry) —
+- [ ] **From the 2026-09-11 bring-up capture** — planned in
+  [START_SHAPES_PLAN.md](START_SHAPES_PLAN.md) (2026-09-11, nothing built) —
   three candidates, none acted on:
   - `config` events on the conductor for `nudge` / `volume` / `eq` commands
     (today `nudge` only toasts), and `nudgeMs` + `anchorPos` + `anchorCtx` +
