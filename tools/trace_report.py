@@ -31,8 +31,12 @@ MIN_ACKS = 8           # a mean of fewer acks than this is not a mean
 
 STEER_COLUMNS = [
     "t", "wall", "node", "name", "track", "errMs", "rate", "runS", "offsetMs",
-    "trustMs", "skewPpm", "nUsed", "lastRttMs",
+    "trustMs", "skewPpm", "nUsed", "lastRttMs", "mapMs",
+    "sentPosMs", "sentAtNodeMs", "sentLeadS", "nudgeMs", "targetCtx", "anchorCtx", "anchorPos",
 ]
+STEP_MS = 30.0         # a jump in err between consecutive acks worth explaining
+MIRROR_MS = 200.0      # a restart's error past this, then the opposite sign next ack
+MIRROR_WINDOW_S = 6.0  # ...within this long, is one bad sample costing two restarts
 
 
 # --- reading -------------------------------------------------------------------
@@ -184,6 +188,120 @@ def spread(stats: Dict[str, dict], min_n: int = MIN_ACKS) -> Optional[dict]:
     return {"ms": ms, "metres": ms * METRES_PER_MS, "nodes": len(means)}
 
 
+def _num(v) -> Optional[float]:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if x == x else None
+
+
+def _pos_at_target_ms(r: dict) -> Optional[float]:
+    """The node's own posAt(targetCtx), in ms, from the fields it sent on the
+    ack — the same line through the same anchors, so it reproduces the err the
+    node computed (to within the rate trim over the ~0.3 s target lead)."""
+    ap, ac, tc = _num(r.get("anchorPos")), _num(r.get("anchorCtx")), _num(r.get("targetCtx"))
+    rate = _num(r.get("rate"))
+    if ap is None or ac is None or tc is None:
+        return None
+    return (ap + max(0.0, tc - ac) * (rate if rate is not None else 1.0)) * 1000.0
+
+
+def steps(rows: List[dict], thresh_ms: float = STEP_MS) -> List[dict]:
+    """Every jump in err of more than `thresh_ms` between consecutive acks on
+    one source (same node, same track, runS increasing — a restart is a new
+    source and is not a step), with the jump laid against each input of err:
+
+        err = posAt(target) - posMs,  target = (sentAt + nudge - map) / 1000
+
+    so  d(err) = (d sentAt - d sentPos) + d nudge - d map + d book + rest,
+    where `book` is the anchors' own movement beyond the target's and `rest` is
+    whatever the columns this trace carries cannot account for. A trace from
+    before the conductor half logged the target has only `map`; before the
+    node half, no `nudge`/`book`. The column that jumped is the answer; a
+    `rest` that carries the whole step is a column this trace does not have.
+    """
+    # A restart's own ack arrives a hair after its event, carrying the reading
+    # that fired it: it is the last reading of the old source, and the pair
+    # after it is the correction, not a step.
+    restarted: Dict[str, List[float]] = defaultdict(list)
+    for ev in events(rows, "restart"):
+        t = _num(ev.get("t"))
+        if t is not None:
+            restarted[str(ev.get("node"))].append(t)
+
+    def fired(key: str, r: dict) -> bool:
+        t = _num(r.get("t"))
+        return t is not None and any(0.0 <= t - t0 <= 0.25 for t0 in restarted.get(key, ()))
+
+    prev: Dict[str, dict] = {}
+    out: List[dict] = []
+    for r in rows:
+        if r.get("kind") != "steer":
+            continue
+        key = str(r.get("node") or r.get("name"))
+        p = prev.get(key)
+        prev[key] = r
+        if p is None or p.get("track") != r.get("track") or fired(key, p):
+            continue
+        run_p, run_r, e_p, e_r = _num(p.get("runS")), _num(r.get("runS")), _num(p.get("errMs")), _num(r.get("errMs"))
+        if None in (run_p, run_r, e_p, e_r) or run_r <= run_p:
+            continue
+        d_err = e_r - e_p
+        if abs(d_err) <= thresh_ms:
+            continue
+
+        def delta(field):
+            a, b = _num(p.get(field)), _num(r.get(field))
+            return None if a is None or b is None else b - a
+
+        d_at, d_pos = delta("sentAtNodeMs"), delta("sentPosMs")
+        target = None if d_at is None or d_pos is None else d_at - d_pos
+        nudge = delta("nudgeMs")
+        map_ = delta("mapMs")
+        pa_p, pa_r = _pos_at_target_ms(p), _pos_at_target_ms(r)
+        d_tc = delta("targetCtx")
+        book = None if None in (pa_p, pa_r, d_tc) else (pa_r - pa_p) - d_tc * 1000.0
+        rest = d_err - sum(v for v in (target, nudge, (-map_ if map_ is not None else None), book) if v is not None)
+        out.append({
+            "wall": _short_wall(r), "name": str(r.get("name") or key), "track": r.get("track"),
+            "runS": run_r, "errFrom": e_p, "errTo": e_r, "dErr": d_err,
+            "target": target, "nudge": nudge, "map": None if map_ is None else -map_,
+            "book": book, "rest": rest,
+        })
+    return out
+
+
+def mirrors(rows: List[dict]) -> List[dict]:
+    """Restarts that were one bad sample: a fault past MIRROR_MS, and the same
+    node's next ack within MIRROR_WINDOW_S of the opposite sign and at least
+    six-tenths the size. The audio was fine, the reading was not, and the
+    restart moved it — the signature slice 2 of START_SHAPES_PLAN waits for."""
+    steer = [r for r in rows if r.get("kind") == "steer"]
+    out: List[dict] = []
+    for ev in events(rows, "restart"):
+        e = _num(ev.get("errMs"))
+        t0 = _num(ev.get("t"))
+        if e is None or t0 is None or abs(e) < MIRROR_MS:
+            continue
+        key = ev.get("node")
+        for r in steer:
+            t = _num(r.get("t"))
+            # The restart's own ack follows its event by a hair, carrying the
+            # reading that fired it; the one after is the reading that counts.
+            if r.get("node") != key or t is None or t - t0 < 0.25:
+                continue
+            if t - t0 > MIRROR_WINDOW_S:
+                break
+            nxt = _num(r.get("errMs"))
+            if nxt is None:
+                continue
+            if nxt * e < 0 and abs(nxt) >= 0.6 * abs(e):
+                out.append({"wall": _short_wall(ev), "name": ev.get("name"), "errMs": e, "nextMs": nxt})
+            break
+    return out
+
+
 def events(rows: List[dict], kind: str) -> List[dict]:
     return [r for r in rows if r.get("kind") == "event" and r.get("event") == kind]
 
@@ -323,6 +441,27 @@ def report(rows: List[dict], source: str = "") -> str:
     plays = events(rows, "play")
     if plays:
         out.append(f"  plays: {len(plays)}, first {_short_wall(plays[0])}, last {_short_wall(plays[-1])}")
+    mir = mirrors(rows)
+    if mir:
+        out.append("  mirror pairs (one bad sample, two restarts): " + "; ".join(
+            f"{m['wall']} {m['name']} {m['errMs']:+.0f} -> {m['nextMs']:+.0f}" for m in mir
+        ))
+    else:
+        out.append("  mirror pairs: none")
+    out.append("")
+
+    # --- steps: what moved
+    st = steps(rows)
+    out.append(f"STEPS in err > {STEP_MS:.0f} ms between consecutive acks on one source ({len(st)}) - what moved, ms")
+    if st:
+        out.append(f"  {'wall':<9} {'node':<20} {'err from -> to':>18}  {'target':>7} {'nudge':>7} {'-map':>7} {'book':>7} {'rest':>7}")
+        for d in st:
+            out.append(
+                f"  {d['wall']:<9} {d['name']:<20} {d['errFrom']:>+8.1f} -> {d['errTo']:>+7.1f}  "
+                f"{_f(d['target'], '+.1f'):>7} {_f(d['nudge'], '+.1f'):>7} {_f(d['map'], '+.1f'):>7} "
+                f"{_f(d['book'], '+.1f'):>7} {_f(d['rest'], '+.1f'):>7}"
+            )
+        out.append("  (a column carrying the step is the input that moved; `rest` is what this trace's columns cannot see)")
     out.append("")
 
     # --- mesh

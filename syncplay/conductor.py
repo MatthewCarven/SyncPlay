@@ -282,6 +282,17 @@ def _clean_map_ms(v) -> Optional[float]:
     return ms if math.isfinite(ms) and abs(ms) <= 1e12 else None
 
 
+def _clean_bounded(v, bound: float) -> Optional[float]:
+    """A finite number off the wire within +/-bound, else None. For the servo's
+    own inputs on a steerAck (nudge, target, anchors): diagnostic columns,
+    never steering — so a lie costs a wrong number in a trace, nothing more."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) and abs(x) <= bound else None
+
+
 def _clean_choice(v, allowed: Tuple[str, ...], default: Optional[str]) -> Optional[str]:
     """A label off the wire, kept only if it is one we defined."""
     return v if isinstance(v, str) and v in allowed else default
@@ -628,6 +639,7 @@ class Node:
         # output-timestamp mapping from its last steerAck.
         self.last_start: Optional[dict] = None
         self.map_ms: Optional[float] = None
+        self.last_steer: Optional[Tuple[float, float, float]] = None
 
     def begin_session(self, ws: web.WebSocketResponse, ua: str) -> None:
         self.ws = ws
@@ -655,6 +667,11 @@ class Node:
         self.servo = {}
         self.last_start = None
         self.map_ms = None
+        # (t_ref, pos_ms, at_node_ms) of the last steer this node was sent —
+        # the target its next ack's `err` is measured against. Logged on the
+        # steer line so a step in `err` can be read against a target that did
+        # or did not move, without asking the node anything.
+        self.last_steer: Optional[Tuple[float, float, float]] = None
         # The build stamped into the page this node actually loaded. Survives a
         # WebSocket reconnect, because the page did — which is the case a
         # connect-time check would wrongly call fresh.
@@ -1995,12 +2012,14 @@ class Conductor:
             if node.connected and node.playing_track == p.track.id:
                 est = node.model.estimate()
                 if est is not None:
+                    at_node_ms = est.to_node_time(t_ref) * 1000.0
+                    node.last_steer = (t_ref, pos_ms, at_node_ms)
                     await node.send(
                         {
                             "type": "steer",
                             "trackId": p.track.id,
                             "posMs": pos_ms,
-                            "atNodeMs": est.to_node_time(t_ref) * 1000.0,
+                            "atNodeMs": at_node_ms,
                         }
                     )
 
@@ -2128,9 +2147,9 @@ class Conductor:
                 " [mesh]" if node.mesh else "",
                 "" if node.prior_skew is None
                 else " [seeded %+.1f ppm]" % (node.prior_skew * 1e6),
-                device,
+                device + ("" if not node.nudge_ms else " [nudge %+.0f ms]" % node.nudge_ms),
             ),
-            node=node, fresh=fresh, build=build, mesh=node.mesh,
+            node=node, fresh=fresh, build=build, mesh=node.mesh, nudgeMs=node.nudge_ms,
             seededPpm=None if node.prior_skew is None else node.prior_skew * 1e6,
             sampleRate=node.sample_rate, baseLatencyMs=node.base_latency_ms,
             outputLatencyMs=node.output_latency_ms, servo=node.servo,
@@ -2380,6 +2399,11 @@ class Conductor:
                 # The TODO's "~10-line JSONL sidecar per steerAck", exactly.
                 est = node.model.estimate()
                 rate = node.play_rate
+                # What `err` was measured against (sent*, from this side) and
+                # what it was measured with (the node's nudge, target and
+                # anchors, off the ack; None from a page too old to send them).
+                # Together they make a step in `err` name its own input.
+                sent = node.last_steer
                 self._trace(
                     "steer", node=node.client_id, name=node.name,
                     track=None if node.playing_track is None
@@ -2393,6 +2417,13 @@ class Conductor:
                     nUsed=0 if est is None else est.n_used,
                     lastRttMs=None if est is None else est.last_rtt * 1000.0,
                     mapMs=node.map_ms,
+                    sentPosMs=None if sent is None else sent[1],
+                    sentAtNodeMs=None if sent is None else sent[2],
+                    sentLeadS=None if sent is None else sent[0] - now(),
+                    nudgeMs=_clean_bounded(data.get("nudgeMs"), 1e4),
+                    targetCtx=_clean_bounded(data.get("targetCtx"), 1e9),
+                    anchorCtx=_clean_bounded(data.get("anchorCtx"), 1e9),
+                    anchorPos=_clean_bounded(data.get("anchorPos"), 1e6),
                 )
         elif kind == "state":
             node.playing_track = data.get("playing")
@@ -2611,10 +2642,17 @@ class Conductor:
             node = self.nodes.get(str(data.get("nodeId")))
             if node is not None:
                 try:
+                    was = node.nudge_ms
                     node.nudge_ms = max(-500.0, min(500.0, float(data.get("nudgeMs", 0))))
                 except ValueError:
                     return
                 self._save_state()
+                # A nudge moves the servo's target, and a moved target is a
+                # step in `err` on the next ack. Info level: it is audible.
+                await self.event(
+                    "config", "nudge %+.0f -> %+.0f ms" % (was, node.nudge_ms),
+                    node=node, nudgeMs=node.nudge_ms, was=was,
+                )
                 await node.send({"type": "config", "nudgeMs": node.nudge_ms,
                                  "volume": node.volume, "eqDb": node.eq_db})
                 await self.push_state()
@@ -2622,10 +2660,15 @@ class Conductor:
             node = self.nodes.get(str(data.get("nodeId")))
             if node is not None:
                 try:
+                    was = node.volume
                     node.volume = max(0, min(100, int(float(data.get("volume", 80)))))
                 except (ValueError, TypeError):
                     return
                 self._save_state()
+                await self.event(
+                    "config", "volume %s -> %d" % ("-" if was is None else was, node.volume),
+                    node=node, level="debug", volume=node.volume, was=was,
+                )
                 await node.send({"type": "config", "nudgeMs": node.nudge_ms,
                                  "volume": node.volume, "eqDb": node.eq_db})
                 await self.push_state()
@@ -2661,6 +2704,10 @@ class Conductor:
             if node is not None:
                 node.eq_db = _clean_eq(data.get("eqDb"))
                 self._save_state()
+                await self.event(
+                    "config", "eq " + " ".join("%+g" % v for v in node.eq_db),
+                    node=node, level="debug", eqDb=node.eq_db,
+                )
                 await node.send({"type": "config", "nudgeMs": node.nudge_ms,
                                  "volume": node.volume, "eqDb": node.eq_db})
                 await self.push_state()

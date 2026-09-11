@@ -191,12 +191,14 @@ the player audio path only when unavoidable, one commit per feature so
 - [ ] **From the 2026-09-11 bring-up capture** — planned in
   [START_SHAPES_PLAN.md](START_SHAPES_PLAN.md) (2026-09-11, nothing built) —
   three candidates, none acted on:
-  - `config` events on the conductor for `nudge` / `volume` / `eq` commands
-    (today `nudge` only toasts), and `nudgeMs` + `anchorPos` + `anchorCtx` +
-    `rate` on the steerAck, so a persistent err step names its input. Shape
-    A (+60..+90 ms on laptop and pc together, 2–4 s after a start, twice, all
-    logged inputs steady) is unresolved without them. Conductor half needs no
-    reload; the ack half does.
+  - [x] slice 1 (2026-09-11): `config` events for `nudge` / `volume` / `eq`,
+    the sent target on every steer line (`sentPosMs` / `sentAtNodeMs` /
+    `sentLeadS`), `nudgeMs` / `targetCtx` / `anchorCtx` / `anchorPos` on the
+    steerAck, and a STEPS table + MIRRORS line in `trace_report.py`. Shape A
+    is still unattributed in the day's trace (map 0, all `rest`), but a live
+    nudge reproduced its signature exactly, and the next one will carry its
+    input. The phone/tablet start transients turned out to be map moves.
+    Needs a :8927 restart + a reload for the ack half.
   - Fault confirm-on-next-ack in `onSteer`: the phone's -749 -> +750 mirror
     pair (one false sample, two restarts). Evidence-gated: wait for a second
     mirror pair before touching the servo.

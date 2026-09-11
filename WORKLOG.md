@@ -2439,3 +2439,53 @@ at join time too.
 order on the table: (1) `config` events + steerAck inputs, so Shape A can
 be named next time; (2) fault-confirm-on-next-ack, once a second mirror pair
 is seen; (3) cadence deadband — trivial, cosmetic. Matthew's call.
+
+## 2026-09-11 (late) — start-shapes slice 1: a step names its input
+
+**Built.** Conductor: `_steer_all` remembers `node.last_steer = (t_ref,
+pos_ms, at_node_ms)`; the steer trace line carries `sentPosMs`,
+`sentAtNodeMs`, `sentLeadS` (target instant minus ack time, ~+0.3 s) and,
+off the ack, `nudgeMs`, `targetCtx`, `anchorCtx`, `anchorPos` through one
+`_clean_bounded` clamp (None from an old page). `nudge` / `volume` / `eq`
+commands emit a `config` event — nudge at info with `was` and `nudgeMs`
+(it is audible), the other two at debug; the join line says `[nudge +60 ms]`
+when it replays one. Node: the ack sends the four inputs err was made from.
+Tool: `trace_report.py` gains STEPS — every >30 ms jump between consecutive
+acks on one source, laid against `target` (ΔsentAt − ΔsentPos), `nudge`,
+`-map`, `book` (the anchors beyond the target, via the ack's own posAt line)
+and `rest` (what the columns can't see); the ack that fired a restart is the
+old source's last reading, so the pair after it is a correction, not a step
+— and MIRRORS, the gate for slice 2: a fault past 200 ms whose next ack is
+the opposite sign at ≥ 0.6× within 6 s.
+
+**Verified.** 5 new tests in `tests/test_trace.py` (the steer line carries
+sent + node inputs, junk to None, an old page leaves them None; nudge /
+volume / eq are config events with before → after, a refused nudge says
+nothing; a planted trace with a nudge step, a map step, an anchor step, an
+old-page step, a plain fault and a mirror — each lands in its own column,
+the fault pair is not a step, the mirror is counted); 376 pass.
+`reanchor_harness.js` + 2 checks: every ack carries the four fields, and
+they rebuild the ack's own err through the shipped `posAt` — 22 checks
+pass; `node --check`. Live on a throwaway :8931 with a dev node: play,
+`nudge +60`, and the EVENTS card read `nudge +0 -> +60 ms`; the trace's
+STEPS table read `-6.6 -> +54.2 | target -0.0 nudge +60.0 -map -0.0 book
++0.6 rest +0.3`, the slew ran at 0.8 ms/s and patience restarted at +46 ms
+10 s later — Shape A's signature, reproduced to the letter.
+
+**What the tool said about the day's trace, already.** MIRRORS found the
+phone's 11:12:56 pair. STEPS (8 real steps once restart corrections are
+excluded) split the shapes: the phone 13:42:45 (+101 → 0, `-map` −151),
+the tablet 13:53:43 (−8 → +70, `-map` +100) and 10:50:11 (+151 → +89,
+`-map` −60) are the *map* — those devices' output-timestamp mapping moving
+60–150 ms in the seconds after a start, the "device changing its mind about
+its latency" the column was added for. The laptop/pc Shape A steps show
+`-map` 0.0 and the whole step in `rest`: not the map, and the nudge column
+does not exist in that trace. A live nudge produces exactly that shape; the
+persisted state says no nudge was set; the next occurrence carries
+`nudgeMs` on every ack and a `config` event if one was sent, so it will
+say. Held there.
+
+**Adopting it.** Conductor restart on :8927 (Matthew) for the sent columns
+and the config events; a page reload per node for the ack half — ⟳ says
+which have not. Old pages against the new conductor: the node columns read
+None, nothing else changes.

@@ -268,12 +268,19 @@ def test_steer_lines_carry_the_servo_numbers(bare, tmp_path):
     n = Node("id", "tablet")
     n.playing_track = "trk"
     n.run_since = now() - 30.0
+    n.last_steer = (now() + 0.3, 5000.0, 123456.0)  # what _steer_all sent this node
     feed(n.model)
 
     async def run():
         await tr.start()
-        await bare._on_player_msg(n, {"type": "steerAck", "errMs": 1.5, "rate": 1.0002}, now())
-        await bare._on_player_msg(n, {"type": "steerAck", "errMs": "junk", "rate": "inf"}, now())
+        await bare._on_player_msg(n, {
+            "type": "steerAck", "errMs": 1.5, "rate": 1.0002,
+            "nudgeMs": 12.0, "targetCtx": 100.5, "anchorCtx": 100.2, "anchorPos": 4.7,
+        }, now())
+        await bare._on_player_msg(n, {
+            "type": "steerAck", "errMs": "junk", "rate": "inf",
+            "nudgeMs": "x", "targetCtx": 1e300, "anchorCtx": float("nan"), "anchorPos": None,
+        }, now())
         await tr.stop()
 
     asyncio.run(run())
@@ -282,7 +289,65 @@ def test_steer_lines_carry_the_servo_numbers(bare, tmp_path):
     assert good["errMs"] == 1.5 and good["rate"] == 1.0002
     assert 29.0 < good["runS"] < 31.0 and good["nUsed"] == 16
     assert isinstance(good["offsetMs"], float) and isinstance(good["trustMs"], float)
+    # What err was measured against, from this side: the target that was sent.
+    assert good["sentPosMs"] == 5000.0 and good["sentAtNodeMs"] == 123456.0
+    assert 0.0 < good["sentLeadS"] < 0.35, "the target instant sits ~0.3 s ahead of its ack"
+    # ...and what it was measured with, from the node's side.
+    assert (good["nudgeMs"], good["targetCtx"], good["anchorCtx"], good["anchorPos"]) == (12.0, 100.5, 100.2, 4.7)
     assert junk["errMs"] is None and junk["rate"] is None, "client data, clamped or dropped"
+    assert all(junk[k] is None for k in ("nudgeMs", "targetCtx", "anchorCtx", "anchorPos"))
+    assert junk["sentPosMs"] == 5000.0, "the sent target is ours, not the node's to spoil"
+
+
+def test_a_page_too_old_to_send_its_inputs_leaves_them_none(bare, tmp_path):
+    tr = Trace(tmp_path / "t.jsonl")
+    bare.trace = tr
+    n = Node("id", "old")
+    feed(n.model)
+
+    async def run():
+        await tr.start()
+        await bare._on_player_msg(n, {"type": "steerAck", "errMs": 0.0, "rate": 1.0}, now())
+        await tr.stop()
+
+    asyncio.run(run())
+    (row,) = lines(tr.path)
+    assert row["sentPosMs"] is None and row["sentLeadS"] is None, "never steered: nothing sent"
+    assert row["nudgeMs"] is None and row["targetCtx"] is None
+
+
+def test_a_nudge_is_a_config_event_with_before_and_after(bare):
+    n = Node("id", "pc")
+    n.connected = True
+    n.volume = 80
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+
+    async def noop():
+        pass
+
+    n.send = send
+    bare.nodes = {"id": n}
+    bare._save_state = lambda: None
+    bare.push_state = noop
+
+    asyncio.run(bare._on_control_cmd({"cmd": "nudge", "nodeId": "id", "nudgeMs": 60}))
+    ev = bare.events[-1]
+    assert ev["kind"] == "config" and ev["level"] == "info" and ev["name"] == "pc"
+    assert ev["text"] == "nudge +0 -> +60 ms" and ev["nudgeMs"] == 60.0 and ev["was"] == 0.0
+    assert sent[-1]["type"] == "config" and sent[-1]["nudgeMs"] == 60.0
+    asyncio.run(bare._on_control_cmd({"cmd": "nudge", "nodeId": "id", "nudgeMs": -20}))
+    assert bare.events[-1]["text"] == "nudge +60 -> -20 ms"
+    # Volume and EQ are not audible timing: debug rows, but rows.
+    asyncio.run(bare._on_control_cmd({"cmd": "volume", "nodeId": "id", "volume": 65}))
+    assert bare.events[-1]["kind"] == "config" and bare.events[-1]["level"] == "debug"
+    assert bare.events[-1]["text"] == "volume 80 -> 65" and bare.events[-1]["volume"] == 65
+    asyncio.run(bare._on_control_cmd({"cmd": "eq", "nodeId": "id", "eqDb": [1, -2.5, 0, 0, 3]}))
+    assert bare.events[-1]["text"] == "eq +1 -2.5 +0 +0 +3" and bare.events[-1]["level"] == "debug"
+    asyncio.run(bare._on_control_cmd({"cmd": "nudge", "nodeId": "id", "nudgeMs": "junk"}))
+    assert bare.events[-1]["kind"] == "config" and "eq" in bare.events[-1]["text"], "a refused nudge says nothing"
 
 
 def test_events_reach_the_trace_with_their_fields(bare, tmp_path):
@@ -480,3 +545,102 @@ def test_the_cli_runs_on_the_newest_trace(tmp_path):
         capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert missing.returncode == 2 and "no trace found" in missing.stderr
+
+
+def steps_trace(path: Path) -> None:
+    """Five nodes, one thing each: a nudge step, a map step, a step in the
+    anchors, a step with no visible input (rest), a restart pair that is not a
+    step, and a mirror pair. All on one track, acks two seconds apart."""
+    rows = []
+
+    def w(i):
+        s = 21 * 3600 + i
+        return "%02d:%02d:%02d.000" % (s // 3600, (s // 60) % 60, s % 60)
+
+    def line(kind, t, **f):
+        rows.append({"t": float(t), "wall": w(int(t)), "kind": kind, **f})
+
+    line("start", 0, build="feedface", musicDir="M", playLeadS=1.8, catchupWaitS=35.0, samples=False)
+
+    def ack(name, t, err, *, run, sent_pos, sent_at, nudge=None, map_ms=1000.0,
+            anchor_ctx=None, anchor_pos=None, target=None, rate=1.0):
+        line("steer", t, node=f"id-{name}", name=name, track="trk", errMs=err, rate=rate,
+             runS=run, offsetMs=0.0, trustMs=0.5, skewPpm=0.0, nUsed=50, lastRttMs=1.0,
+             mapMs=map_ms, sentPosMs=sent_pos, sentAtNodeMs=sent_at, sentLeadS=0.3,
+             nudgeMs=nudge, targetCtx=target, anchorCtx=anchor_ctx, anchorPos=anchor_pos)
+
+    # nudger: the target moved because the nudge did. Anchors and map steady.
+    for k, (err, nudge) in enumerate(((0.0, 0.0), (0.0, 0.0), (60.0, 60.0))):
+        t = 10 + 2 * k
+        ack("nudger", t, err, run=2 + 2 * k, sent_pos=2000.0 + 2000 * k, sent_at=50000.0 + 2000 * k,
+            nudge=nudge, target=50.0 + 2 * k + nudge / 1000, anchor_ctx=49.7 + 2 * k, anchor_pos=1.7 + 2 * k)
+    # mapper: the map moved (a device changing its mind about its latency).
+    for k, (err, m) in enumerate(((0.0, 1000.0), (0.0, 1000.0), (-50.0, 1050.0))):
+        t = 10 + 2 * k
+        ack("mapper", t, err, run=2 + 2 * k, sent_pos=2000.0 + 2000 * k, sent_at=50000.0 + 2000 * k,
+            nudge=0.0, map_ms=m, target=50.0 + 2 * k - (m - 1000.0) / 1000, anchor_ctx=49.7 + 2 * k,
+            anchor_pos=1.7 + 2 * k)
+    # booker: the anchors jumped 40 ms further than the target did.
+    for k, (err, jump) in enumerate(((0.0, 0.0), (0.0, 0.0), (40.0, 0.04))):
+        t = 10 + 2 * k
+        ack("booker", t, err, run=2 + 2 * k, sent_pos=2000.0 + 2000 * k, sent_at=50000.0 + 2000 * k,
+            nudge=0.0, target=50.0 + 2 * k, anchor_ctx=49.7 + 2 * k, anchor_pos=1.7 + 2 * k + jump)
+    # ghost: an old page - only errMs and mapMs. The step lands in `rest`.
+    for k, err in enumerate((0.0, 0.0, 70.0)):
+        line("steer", 10 + 2 * k, node="id-ghost", name="ghost", track="trk", errMs=err, rate=1.0,
+             runS=2 + 2 * k, offsetMs=0.0, trustMs=0.5, skewPpm=0.0, nUsed=50, lastRttMs=1.0, mapMs=1000.0)
+    # faulter: a real fault, one restart, corrected - not a step, not a mirror.
+    line("steer", 10, node="id-faulter", name="faulter", track="trk", errMs=0.0, rate=1.0, runS=2, mapMs=1000.0)
+    line("event", 12, event="restart", level="warning", node="id-faulter", name="faulter",
+         text="source restarted", restarts=1, cause="reanchor", reason="fault", errMs=-400.0)
+    line("steer", 12.0003, node="id-faulter", name="faulter", track="trk", errMs=-400.0, rate=1.0, runS=0.0, mapMs=1000.0)
+    line("steer", 14, node="id-faulter", name="faulter", track="trk", errMs=0.0, rate=1.0, runS=2.0, mapMs=1000.0)
+    # mirror: one bad sample, two restarts.
+    line("steer", 10, node="id-mirror", name="mirror", track="trk", errMs=0.0, rate=1.0, runS=100, mapMs=1000.0)
+    line("event", 12, event="restart", level="warning", node="id-mirror", name="mirror",
+         text="source restarted", restarts=1, cause="reanchor", reason="fault", errMs=-749.0)
+    line("steer", 12.0003, node="id-mirror", name="mirror", track="trk", errMs=-749.0, rate=1.0, runS=0.0, mapMs=1000.0)
+    line("event", 14, event="restart", level="warning", node="id-mirror", name="mirror",
+         text="source restarted", restarts=2, cause="reanchor", reason="fault", errMs=750.0)
+    line("steer", 14.0003, node="id-mirror", name="mirror", track="trk", errMs=750.0, rate=1.0, runS=0.0, mapMs=1000.0)
+    line("steer", 16, node="id-mirror", name="mirror", track="trk", errMs=-1.0, rate=1.0, runS=2.0, mapMs=1000.0)
+    with open(path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+
+def test_steps_lay_a_jump_against_its_inputs(tmp_path):
+    p = tmp_path / "t.jsonl"
+    steps_trace(p)
+    rows = R.load(p)
+    by = {d["name"]: d for d in R.steps(rows)}
+    assert set(by) == {"nudger", "mapper", "booker", "ghost"}, "restart pairs are corrections, not steps"
+    assert by["nudger"]["nudge"] == pytest.approx(60.0) and by["nudger"]["rest"] == pytest.approx(0.0, abs=1e-6)
+    assert by["nudger"]["target"] == pytest.approx(0.0) and by["nudger"]["book"] == pytest.approx(0.0, abs=1e-6)
+    assert by["mapper"]["map"] == pytest.approx(-50.0) and by["mapper"]["rest"] == pytest.approx(0.0, abs=1e-6)
+    assert by["booker"]["book"] == pytest.approx(40.0) and by["booker"]["rest"] == pytest.approx(0.0, abs=1e-6)
+    assert by["ghost"]["target"] is None and by["ghost"]["nudge"] is None and by["ghost"]["book"] is None
+    assert by["ghost"]["map"] == pytest.approx(0.0) and by["ghost"]["rest"] == pytest.approx(70.0)
+    assert all(d["dErr"] == pytest.approx(d["errTo"] - d["errFrom"]) for d in by.values())
+
+
+def test_mirror_pairs_are_counted_and_a_plain_fault_is_not(tmp_path):
+    p = tmp_path / "t.jsonl"
+    steps_trace(p)
+    rows = R.load(p)
+    (m,) = R.mirrors(rows)
+    assert m["name"] == "mirror" and m["errMs"] == -749.0 and m["nextMs"] == 750.0
+    text = R.report(rows)
+    assert "mirror pairs (one bad sample, two restarts): 21:00:12 mirror -749 -> +750" in text
+    assert "STEPS in err > 30 ms between consecutive acks on one source (4)" in text
+    st = text.index("STEPS")
+    assert text.index("nudger", st) < text.index("(a column carrying the step", st)
+    assert "faulter" not in text[st:text.index("(a column", st)]
+
+
+def test_a_trace_without_restarts_or_steps_says_so(tmp_path):
+    p = tmp_path / "trace-20260903-201500.jsonl"
+    planted_trace(p)
+    text = R.report(R.load(p))
+    assert "mirror pairs: none" in text
+    assert "STEPS in err > 30 ms between consecutive acks on one source (0)" in text

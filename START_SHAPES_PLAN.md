@@ -1,6 +1,7 @@
 # Plan — the three shapes from the 2026-09-11 capture
 
-Status: **planned 2026-09-11, nothing built.** Three slices, three commits,
+Status: **slice 1 built 2026-09-11 (both halves, one commit); slices 3 and 2
+not started.** Three slices, three commits,
 each a `git revert` from the last. Matthew asked for the plan first; the
 slices run afterwards, one per "continue".
 
@@ -34,6 +35,16 @@ slice 2 is a servo rule (evidence-gated), slice 3 is event hygiene.
    audible trade-off before it goes in.
 
 ## Slice 1 — a step names its input
+
+*Built 2026-09-11.* One naming change from the plan: the sent triple's
+third column is `sentLeadS` (target instant minus ack time, ~+0.3 s), not
+an age — the target sits *ahead* of the ack. The MIRRORS line went in with
+it. Run against the day's trace, the STEPS table already split the shapes:
+the phone's and tablet's start transients are in the `-map` column (their
+output-timestamp mapping moved 60–150 ms), the laptop/pc Shape A steps show
+map 0 and everything in `rest`. And a live +60 ms nudge on a throwaway
+reproduced Shape A's signature exactly — the step, the 0.8 ms/s slew, the
+patience restart 10 s later — with the table reading `nudge +60.0`.
 
 **Problem.** Shape A: laptop and pc stepped +60/+71 then +84/+73 ms together
 2–4 s after a start, twice, and slewed at exactly 0.8 ms/s until patience

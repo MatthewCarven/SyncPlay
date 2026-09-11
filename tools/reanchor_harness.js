@@ -134,7 +134,9 @@ function steerAt(h, errMs) {
   // hand-rolled copy quietly omitted.
   const t = h.now();
   const atNodeMs = 100000 + (t - 100) * 1000;   // maps through perfToCtx to t
-  h.steer({ trackId: "trk", posMs: (h.posAt(t) - errMs / 1000) * 1000, atNodeMs });
+  const m = { trackId: "trk", posMs: (h.posAt(t) - errMs / 1000) * 1000, atNodeMs };
+  h.steer(m);
+  return m;
 }
 
 // 1. stranded: 120 ms out and staying there
@@ -209,6 +211,19 @@ function starts(h) { return h.sent.filter((m) => m.type === "state" && m.playing
   const acks = h.sent.filter((m) => m.type === "steerAck");
   check("every steerAck carries mapMs from the output-timestamp pair",
         acks.length === 40 && acks.every((m) => typeof m.mapMs === "number"));
+  // The inputs ride with the reading, and they reproduce it: err is what the
+  // shipped posAt() gives at the target minus the posMs the steer carried.
+  // The harness knows posMs because steerAt() built it; the ack's anchors are
+  // the post-steer ones, and posAt is the same line through either anchor.
+  check("every steerAck carries nudgeMs, targetCtx and the anchors",
+        acks.every((m) => ["nudgeMs", "targetCtx", "anchorCtx", "anchorPos"]
+                             .every((k) => typeof m[k] === "number")));
+  const m = steerAt(h, 7);
+  const last = h.sent[h.sent.length - 1];
+  const rebuilt = last.anchorPos + Math.max(0, last.targetCtx - last.anchorCtx) * last.rate;
+  check("the ack's fields rebuild its own err: posAt(target) - posMs, via the shipped posAt",
+        last.type === "steerAck" && Math.abs((rebuilt - m.posMs / 1000) * 1000 - last.errMs) < 1e-6
+        && Math.abs(last.errMs - 7) < 1e-6);
 }
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : "\nall checks passed");

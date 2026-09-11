@@ -641,8 +641,13 @@ function onSteer(msg) {
                                 Math.min(MAX_RATE_TRIM, errS / STEER_HORIZON_S));
     current.src.playbackRate.setValueAtTime(current.rate, nowCtx);
   }
+  // The reading, and everything it was made from: the target (which folds in
+  // nudgeMs and the perf->ctx map) and the anchors posAt() ran on. With the
+  // conductor logging what it sent, a step in err can be laid against each
+  // input and the one that moved is the answer, instead of a guess.
   send({ type: "steerAck", trackId: msg.trackId,
-         errMs: errS * 1000, rate: current.rate, mapMs: mapMs() });
+         errMs: errS * 1000, rate: current.rate, mapMs: mapMs(),
+         nudgeMs, targetCtx, anchorCtx: current.anchorCtx, anchorPos: current.anchorPos });
 }
 
 function onStop(msg) {
