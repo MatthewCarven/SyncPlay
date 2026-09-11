@@ -413,9 +413,29 @@ def test_leaving_with_nothing_to_bank_is_just_a_leave(bare):
 def test_a_boost_change_is_reported_once_per_quarter_step(bare):
     n = Node("id", "n")
     assert bare._note_boost(n, 1.0) is None
-    assert bare._note_boost(n, 1.1) is None, "4.4 rounds to 4: same quarter-step"
-    assert bare._note_boost(n, 1.4) == 1.1, "5.6 rounds to 6: moved, and says from what"
-    assert n.ping_boost == 1.4
+    assert bare._note_boost(n, 1.1) is None, "a tenth: inside the deadband"
+    assert bare._note_boost(n, 1.4) == 1.0, "moved, and says from what it last *said*"
+    assert n.ping_boost == 1.4 and n.ping_boost_said == 1.4
+
+
+def test_a_boost_on_a_bucket_boundary_does_not_chatter(bare):
+    """The pc, 2026-09-11: 1.12 <-> 1.13 straddles the 1.125 quarter-step
+    boundary; bucket-to-bucket comparison announced every crossing, ~100
+    times in a day. Against the last announcement it is silence."""
+    n = Node("id", "pc")
+    for b in (1.0, 1.12, 1.13, 1.12, 1.13, 1.12, 1.13):
+        assert bare._note_boost(n, b) is None
+    assert n.ping_boost == 1.13 and n.ping_boost_said == 1.0, "live value tracks, the announced one holds"
+    assert bare._note_boost(n, 1.3) == 1.0, "a real move from what was last said"
+    assert bare._note_boost(n, 1.13) is None, "0.17 back: inside the band"
+    assert bare._note_boost(n, 1.0) == 1.3, "and the recovery is announced from the 1.3 it said"
+
+
+def test_a_monotonic_climb_is_announced_per_quarter_step(bare):
+    n = Node("id", "tablet")
+    said = [bare._note_boost(n, round(1.0 + 0.1 * i, 1)) for i in range(31)]  # 1.0 .. 4.0
+    assert sum(v is not None for v in said) == 10, "every third tenth clears the quarter-step band"
+    assert n.ping_boost == 4.0 and n.ping_boost_said == 4.0
 
 
 def test_the_first_mesh_sample_for_a_pair_is_an_event_and_the_rest_are_not(bare):

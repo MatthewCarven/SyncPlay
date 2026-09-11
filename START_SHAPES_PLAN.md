@@ -1,7 +1,6 @@
 # Plan — the three shapes from the 2026-09-11 capture
 
-Status: **slice 1 built 2026-09-11 (both halves, one commit); slices 3 and 2
-not started.** Three slices, three commits,
+Status: **slices 1 and 3 built 2026-09-11; slice 2 not started (gated).** Three slices, three commits,
 each a `git revert` from the last. Matthew asked for the plan first; the
 slices run afterwards, one per "continue".
 
@@ -133,6 +132,11 @@ was the last call of this kind; this one is "wrong-for-2-s-then-right beats
 wrong-twice". Matthew's call.
 
 ## Slice 3 — a cadence event with a deadband
+
+*Built 2026-09-11.* Replayed over the day's 10 s node lines: the pc's
+announcements 46 → 7; the tablet 18 → 15 and the phone 9 → 9 (their swings
+to 4× are real and stay). The same replay showed `nudgeMs` = 0.0 on the
+laptop and pc through both Shape A steps — nudge is ruled out by data.
 
 **Problem.** `_note_boost` compares quarter-step *buckets* cycle to cycle.
 The pc's boost sits at 1.125 — on the boundary — so it reported

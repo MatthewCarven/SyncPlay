@@ -202,8 +202,9 @@ the player audio path only when unavoidable, one commit per feature so
   - Fault confirm-on-next-ack in `onSteer`: the phone's -749 -> +750 mirror
     pair (one false sample, two restarts). Evidence-gated: wait for a second
     mirror pair before touching the servo.
-  - A deadband on the `cadence` event: the pc flapped 1.12x <-> 1.13x for
-    hours, ~100 events of noise in the ring.
+  - [x] slice 3 (2026-09-11): `_note_boost` measures against the last value
+    it *announced* (`Node.ping_boost_said`), not last cycle's bucket. Replay
+    over the day's node lines: pc 46 → 7 announcements, tablet/phone kept.
 
 - [x] **Telemetry ladder — events, trace, device facts** (planned 2026-09-02;
       all three done 2026-09-03)

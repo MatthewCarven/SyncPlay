@@ -611,6 +611,7 @@ class Node:
         self.dist_m2 = 0.0
         self.burst_until = 0.0
         self.ping_boost = 1.0  # live cadence multiplier, for the control page
+        self.ping_boost_said = 1.0  # the last value a cadence event announced
         self.kick = asyncio.Event()
         self.ping_task: Optional[asyncio.Task] = None
         self.catchup_task: Optional[asyncio.Task] = None
@@ -1449,15 +1450,23 @@ class Conductor:
                 pass
 
     def _note_boost(self, node: Node, boost: float) -> Optional[float]:
-        """Record the live boost; return the old one when it moved meaningfully.
+        """Record the live boost; return the last one *announced* when this one
+        is a quarter-step or more away from it. None means nothing worth saying.
 
-        A quarter-step, so a node hovering at a threshold can't chatter, but a
-        link genuinely degrading or recovering leaves a trail you can read
-        against the sync numbers afterwards. None means nothing worth saying.
+        Measured against what was last said, not what was last seen. The old
+        test was which quarter-step bucket this cycle landed in, and a node
+        sitting on a bucket boundary (the pc at 1.125, 2026-09-11) chattered
+        1.12x -> 1.13x and back every few seconds for hours - a hundred rows
+        of nothing in the ring. A deadband from the last announcement cannot
+        chatter; a link genuinely degrading or recovering still leaves a trail
+        you can read against the sync numbers afterwards.
         """
-        was = node.ping_boost
         node.ping_boost = boost
-        return was if round(boost * 4) != round(was * 4) else None
+        said = node.ping_boost_said
+        if abs(boost - said) < 0.25:
+            return None
+        node.ping_boost_said = boost
+        return said
 
     async def _burst(self, node: Node, count: int, spacing: float) -> None:
         for _ in range(count):

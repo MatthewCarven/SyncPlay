@@ -2489,3 +2489,36 @@ say. Held there.
 and the config events; a page reload per node for the ack half — ⟳ says
 which have not. Old pages against the new conductor: the node columns read
 None, nothing else changes.
+
+## 2026-09-11 (late) — start-shapes slice 3: a cadence event only when it moved
+
+**Built.** `_note_boost` keeps `node.ping_boost` live every cycle (the pulse
+and the control page read it) and announces only when the boost is a
+quarter-step or more from `node.ping_boost_said`, the last value an event
+carried. The old test was which quarter-step *bucket* this cycle landed in;
+the pc sits at 1.125, on a boundary, and crossed it every few seconds for
+hours. Conductor-only; no cadence change — the boost itself is untouched,
+only when it is mentioned.
+
+**Verified.** Three tests in `tests/test_events.py`: the boundary sequence
+1.0, 1.12, 1.13, 1.12, … announces nothing while the live value tracks; a
+real move to 1.3 announces from the 1.0 it last said, 0.17 back is silence,
+the recovery announces from 1.3; a 0.1-step climb 1.0 → 4.0 announces ten
+times. 378 pass. Replayed over the day's 10 s node lines (the boost
+recomputed from `nUsed`/`nSamples`): pc 46 → 7, tablet 18 → 15, phone
+9 → 9, laptop 0 → 0.
+
+**Found on the way.** The node lines carry `nudgeMs`, and it reads 0.0 on
+the laptop and the pc at 10:50:03, 10:50:13, 10:56:26 and 10:56:36 — both
+Shape A steps bracketed. Nudge is out. Volume moved at 10:52:24 (laptop
+52 → 84, pc 4 → 30), two minutes after the first step and four before the
+second, and a config message carries nudge 0 regardless. Not the map, not
+the nudge, not a config: what is left is the target (the conductor's model)
+or the node's anchors, and slice 1's `target` and `book` columns see both.
+One more thing the anchors run on that no column carries yet:
+`ctx.currentTime` itself, against the output timestamp — if the render
+position ran ahead of the output position by 60 ms (a Windows shared-mode
+buffer change; the laptop's hello has read `out 56.0 ms` and `out 0.0 ms`
+on different joins), the map holds, the target holds, and the bookkeeping
+steps by exactly that. A `renderAheadMs` on the ack would say. Proposed as
+a one-field amendment to slice 1 before the reload that is already owed.
