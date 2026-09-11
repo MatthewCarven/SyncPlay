@@ -188,6 +188,20 @@ the player audio path only when unavoidable, one commit per feature so
 
 ## Next candidates
 
+- [ ] **From the 2026-09-11 bring-up capture** (WORKLOG, evening entry) —
+  three candidates, none acted on:
+  - `config` events on the conductor for `nudge` / `volume` / `eq` commands
+    (today `nudge` only toasts), and `nudgeMs` + `anchorPos` + `anchorCtx` +
+    `rate` on the steerAck, so a persistent err step names its input. Shape
+    A (+60..+90 ms on laptop and pc together, 2–4 s after a start, twice, all
+    logged inputs steady) is unresolved without them. Conductor half needs no
+    reload; the ack half does.
+  - Fault confirm-on-next-ack in `onSteer`: the phone's -749 -> +750 mirror
+    pair (one false sample, two restarts). Evidence-gated: wait for a second
+    mirror pair before touching the servo.
+  - A deadband on the `cadence` event: the pc flapped 1.12x <-> 1.13x for
+    hours, ~100 events of noise in the ring.
+
 - [x] **Telemetry ladder — events, trace, device facts** (planned 2026-09-02;
       all three done 2026-09-03)
   - Full plan in [TELEMETRY_PLAN.md](TELEMETRY_PLAN.md). Slice 1 (done 2026-09-03): an `event()`

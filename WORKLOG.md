@@ -2364,3 +2364,78 @@ screenshot capture came back blank, so the proof is the DOM reads.
 
 **Adopting it.** Conductor restart on :8927 plus a control-page reload;
 `player.js` untouched, so the nodes need nothing.
+
+## 2026-09-11 (evening) — the bring-up capture, read from the trace
+
+**What it is.** Matthew restarted :8927 at 10:46 (on `816ca41`, so the stop
+marker went live — he queued one at 10:47:15 as #14 of a 13-track set, then
+stopped by hand at 11:17 and cleared it at 13:42, so the marker was never
+reached). The conductor has run ~10 h since: `logs/trace-20260911-104631.jsonl`,
+13 MB, 20 524 lines — 6288 steer, 413 events, 29 plays, 110 source starts,
+14 restarts, 4 nodes. No capture script needed: the trace *is* the capture,
+and `tools/trace_report.py` reads it. Read-only; nothing sent to :8927.
+
+**Headline.** Steady state — every ack with `runS >= 15 s`, ~1500 per node:
+
+| node   | mean     | sd       | p95 abs | acks > 25 ms |
+|--------|----------|----------|---------|--------------|
+| laptop | +0.01 ms | 0.05 ms  | 0.1 ms  | 0 of 1522    |
+| phone  | +0.14 ms | 0.67 ms  | 1.2 ms  | 0 of 1527    |
+| pc     | +0.35 ms | 1.17 ms  | 0.6 ms  | 0 of 1524    |
+| tablet | +0.44 ms | 5.14 ms  | 9.5 ms  | 0 of 1083    |
+
+The report's headline sd (15 / 6 / 27 / 16 ms) is entirely the first 15 s
+after starts. 22 of 29 starts were clean to +/-2 ms on every node from the
+first ack. The other seven sort into three shapes.
+
+**Shape A — a +60..+90 ms step on laptop AND pc, 2–4 s after a start, twice
+(10:50:07 seek, 10:56:23 auto).** First ack 0, second +60/+71 (then +84/+73),
+then a decay of exactly 0.8 ms/s — the servo's 800 ppm — until patience
+fires at ~12 s and the re-anchor lands it at 0. The tablet moved the other
+way by a similar amount at 10:50:11 (+151 -> +89); the phone didn't move.
+`err` is `posAt(target) - posMs`: pure bookkeeping, no audio in it — so a
+persistent step needs a stepped *input*. Checked and steady across the step:
+`mapMs` (perf->ctx map, 0.1 ms), `offsetMs`/`skewPpm` (the conductor's
+model), `nUsed`, `trustMs`. Nudge ruled out: no current node has a persisted
+nudge, and a nudge-then-revert would show a mirrored negative step, which
+never appears anywhere in the day. No visibility/join/leave/cadence event
+within a minute of either. Never recurred after 10:57. **Unresolved** — the
+inputs I can see didn't move, so an input I can't see did. The cheap next
+instrument: log `nudge`, `volume` and `eq` commands as `config` events (the
+`nudge` command only toasts today), and carry the node's `nudgeMs`,
+`anchorPos`, `anchorCtx` and `rate` on the steerAck — then a step names its
+own input. The first is conductor-only; the second is a reload.
+
+**Shape B — a first ack far off on a cold start, then 0 (with or without a
+restart).** laptop -410 / -408 (10:47:27 play, 13:53:39 seek — the same
+number twice), phone -260 / -235 / -129 / +101, tablet +185 / +246 / +151.
+Above REANCHOR_S it costs a fault restart (5 of the 14 restarts); below it,
+the second ack simply reads 0 (phone +101 -> 0, -129 -> 0) — the reading was
+transient, the audio was fine. A restart seeks to an absolute position, so
+"0 after the restart" cannot say whether -410 was real (source started 410 ms
+late) or false (a bad first reading); the phone's sub-threshold cases say
+false readings happen at start. Only on `play`/`seek` starts, never `auto`.
+
+**Shape C — the phone's mirror pair, 11:12:56 -749 then 11:12:58 +750, at
+runS 104 s after 100 s of 0.** A false reading of -749 -> fault restart ->
+audio now genuinely 750 ms off -> a true reading of +750 -> second restart
+fixes it. Two audible discontinuities from one bad sample, with the servo
+constants doing exactly what they say. Both fault rules fire on a *single*
+ack. Candidate (not acted on, one occurrence): confirm a fault on the next
+ack before restarting — costs ~2 s of being wrong when it is real, saves
+two restarts when it is not. The mirror is the signature to count for.
+
+**Also seen.** The tablet still can't get a clock fit to time a start from:
+three catch-up timeouts ("still not fit after 35 s"), 13% survival, 596
+zero-crossings, sd 5 ms at steady state — the known thread, unchanged. The
+pc's ping cadence flaps 1.12x <-> 1.13x every few seconds for hours (most of
+the 109 `cadence` events) — the event needs a deadband. `outputLatency` on
+the laptop reads 56 ms on some joins and 0 ms on others, and the phone's
+went 296 -> 280 -> 80 ms across the day — the "device changing its mind
+about its own latency" that the map column was added to catch, now visible
+at join time too.
+
+**Held.** Nothing changed in the servo or the conductor from this. Proposed
+order on the table: (1) `config` events + steerAck inputs, so Shape A can
+be named next time; (2) fault-confirm-on-next-ack, once a second mirror pair
+is seen; (3) cadence deadband — trivial, cosmetic. Matthew's call.
