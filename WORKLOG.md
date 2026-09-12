@@ -2522,3 +2522,35 @@ buffer change; the laptop's hello has read `out 56.0 ms` and `out 0.0 ms`
 on different joins), the map holds, the target holds, and the bookkeeping
 steps by exactly that. A `renderAheadMs` on the ack would say. Proposed as
 a one-field amendment to slice 1 before the reload that is already owed.
+
+## 2026-09-12 — start-shapes slice 1b: the render position, on the ack
+
+**Built.** `renderAheadMs()` in `player.js`: `(ctx.currentTime −
+getOutputTimestamp().contextTime) × 1000` — how far the render position
+(what `posAt`'s anchors run on) sits ahead of the output position (what
+`perfToCtx`, and so the target, runs on). On the steerAck, clamped into the
+steer trace line, and a `render` column in STEPS beside `book`, outside the
+sum: `book` is the anchors moving beyond the target; `render` says whether
+that was the device's buffer moving under them.
+
+**Why.** After slice 3's replay ruled out nudge for Shape A by data (node
+lines: `nudgeMs` 0.0 on laptop and pc through both steps), the map, the
+nudge and configs are all out, leaving the target or the anchors. The
+anchors run on `ctx.currentTime`; the map and target on the output
+timestamp. A Windows shared-mode buffer change (the laptop's hello has read
+`out 56.0 ms` on some joins and `out 0.0 ms` on others) moves the render
+position relative to the output by the buffer delta, and the bookkeeping
+with it — map holds, target holds, err steps by exactly that, on every
+Windows box that shares the device change. It is the one input no column
+carried.
+
+**Verified.** Harness +2 checks (every ack carries it; against the stub's
+pinned output timestamp it is exactly the harness's advance) — 24 pass;
+`node --check`; `tests/test_trace.py` — the steer line carries it, junk is
+None, the planted `booker` step reads `book +40.0 | render +40.0` while
+`nudger` reads `render +0.0` and the old page `-` — 378 pass. Live on a
+throwaway :8931 with a dev node on the laptop: `renderAheadMs` read 78.7 ms
+in the console — `baseLatency` 20.3 + `outputLatency` 56.0 — and on the
+trace 27 acks read mean 71.0 ms, sd 3.7, min 52.5, max 72.5 - it moves, a 20 ms dip on one ack of a hidden in-app tab, which is precisely why it earns a column.
+
+**Adopting it.** Same reload as slice 1's ack half; nothing extra owed.

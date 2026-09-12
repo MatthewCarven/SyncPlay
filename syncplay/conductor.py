@@ -2433,6 +2433,7 @@ class Conductor:
                     targetCtx=_clean_bounded(data.get("targetCtx"), 1e9),
                     anchorCtx=_clean_bounded(data.get("anchorCtx"), 1e9),
                     anchorPos=_clean_bounded(data.get("anchorPos"), 1e6),
+                    renderAheadMs=_clean_bounded(data.get("renderAheadMs"), 1e6),
                 )
         elif kind == "state":
             node.playing_track = data.get("playing")

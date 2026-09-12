@@ -33,6 +33,7 @@ STEER_COLUMNS = [
     "t", "wall", "node", "name", "track", "errMs", "rate", "runS", "offsetMs",
     "trustMs", "skewPpm", "nUsed", "lastRttMs", "mapMs",
     "sentPosMs", "sentAtNodeMs", "sentLeadS", "nudgeMs", "targetCtx", "anchorCtx", "anchorPos",
+    "renderAheadMs",
 ]
 STEP_MS = 30.0         # a jump in err between consecutive acks worth explaining
 MIRROR_MS = 200.0      # a restart's error past this, then the opposite sign next ack
@@ -220,6 +221,11 @@ def steps(rows: List[dict], thresh_ms: float = STEP_MS) -> List[dict]:
     before the conductor half logged the target has only `map`; before the
     node half, no `nudge`/`book`. The column that jumped is the answer; a
     `rest` that carries the whole step is a column this trace does not have.
+
+    `render` sits outside the sum: it is the change in how far the render
+    position runs ahead of the output position, the one thing the anchors run
+    on that the target does not. A `book` that matches `render` is the device's
+    buffer moving under the bookkeeping, not the servo's arithmetic.
     """
     # A restart's own ack arrives a hair after its event, carrying the reading
     # that fired it: it is the last reading of the old source, and the pair
@@ -267,7 +273,7 @@ def steps(rows: List[dict], thresh_ms: float = STEP_MS) -> List[dict]:
             "wall": _short_wall(r), "name": str(r.get("name") or key), "track": r.get("track"),
             "runS": run_r, "errFrom": e_p, "errTo": e_r, "dErr": d_err,
             "target": target, "nudge": nudge, "map": None if map_ is None else -map_,
-            "book": book, "rest": rest,
+            "book": book, "rest": rest, "render": delta("renderAheadMs"),
         })
     return out
 
@@ -454,14 +460,15 @@ def report(rows: List[dict], source: str = "") -> str:
     st = steps(rows)
     out.append(f"STEPS in err > {STEP_MS:.0f} ms between consecutive acks on one source ({len(st)}) - what moved, ms")
     if st:
-        out.append(f"  {'wall':<9} {'node':<20} {'err from -> to':>18}  {'target':>7} {'nudge':>7} {'-map':>7} {'book':>7} {'rest':>7}")
+        out.append(f"  {'wall':<9} {'node':<20} {'err from -> to':>18}  {'target':>7} {'nudge':>7} {'-map':>7} {'book':>7} {'rest':>7} | {'render':>7}")
         for d in st:
             out.append(
                 f"  {d['wall']:<9} {d['name']:<20} {d['errFrom']:>+8.1f} -> {d['errTo']:>+7.1f}  "
                 f"{_f(d['target'], '+.1f'):>7} {_f(d['nudge'], '+.1f'):>7} {_f(d['map'], '+.1f'):>7} "
-                f"{_f(d['book'], '+.1f'):>7} {_f(d['rest'], '+.1f'):>7}"
+                f"{_f(d['book'], '+.1f'):>7} {_f(d['rest'], '+.1f'):>7} | {_f(d['render'], '+.1f'):>7}"
             )
-        out.append("  (a column carrying the step is the input that moved; `rest` is what this trace's columns cannot see)")
+        out.append("  (a column carrying the step is the input that moved; `rest` is what this trace's columns cannot see;")
+        out.append("   `render` is outside the sum - a `book` that matches it is the device's buffer moving under the anchors)")
     out.append("")
 
     # --- mesh

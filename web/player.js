@@ -598,6 +598,19 @@ function mapMs() {
   return ts.performanceTime - ts.contextTime * 1000;
 }
 
+// How far the render position (ctx.currentTime, what posAt's anchors run on)
+// sits ahead of the output position (the timestamp pair, what perfToCtx and
+// so the target run on). Steady on a healthy device - it is the buffer
+// between the two. A step here moves the bookkeeping and nothing else: the
+// map holds, the target holds, err steps by exactly this. The Shape A
+// candidate (START_SHAPES_PLAN, 2026-09-11), as one number.
+function renderAheadMs() {
+  if (!ctx.getOutputTimestamp) return null;
+  const ts = ctx.getOutputTimestamp();
+  if (!ts || !(ts.contextTime > 0)) return null;
+  return (ctx.currentTime - ts.contextTime) * 1000;
+}
+
 // v2 servo: the conductor says "at your local time L the song should be at P".
 // Compare with where we'll actually be, trim playbackRate microscopically.
 function onSteer(msg) {
@@ -647,7 +660,8 @@ function onSteer(msg) {
   // input and the one that moved is the answer, instead of a guess.
   send({ type: "steerAck", trackId: msg.trackId,
          errMs: errS * 1000, rate: current.rate, mapMs: mapMs(),
-         nudgeMs, targetCtx, anchorCtx: current.anchorCtx, anchorPos: current.anchorPos });
+         nudgeMs, targetCtx, anchorCtx: current.anchorCtx, anchorPos: current.anchorPos,
+         renderAheadMs: renderAheadMs() });
 }
 
 function onStop(msg) {

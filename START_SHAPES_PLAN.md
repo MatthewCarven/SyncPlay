@@ -1,6 +1,7 @@
 # Plan — the three shapes from the 2026-09-11 capture
 
-Status: **slices 1 and 3 built 2026-09-11; slice 2 not started (gated).** Three slices, three commits,
+Status: **slices 1 and 3 built 2026-09-11, slice 1b (`renderAheadMs`) 2026-09-12;
+slice 2 not started (gated).** Three slices, three commits,
 each a `git revert` from the last. Matthew asked for the plan first; the
 slices run afterwards, one per "continue".
 
@@ -44,6 +45,15 @@ output-timestamp mapping moved 60–150 ms), the laptop/pc Shape A steps show
 map 0 and everything in `rest`. And a live +60 ms nudge on a throwaway
 reproduced Shape A's signature exactly — the step, the 0.8 ms/s slew, the
 patience restart 10 s later — with the table reading `nudge +60.0`.
+
+*Slice 1b, 2026-09-12.* One more input the anchors run on that no column
+carried: `ctx.currentTime` (the render position) against the output
+timestamp's `contextTime` (the output position). `renderAheadMs` rides the
+ack; STEPS prints it as `render`, outside the sum, beside `book` — a `book`
+that matches `render` is the device's buffer moving under the anchors. On
+the laptop it reads base + output latency (20.3 + 56.0 ≈ 76 ms), which is
+what it should be; the question is whether it steps by 60–85 ms at the
+moments Shape A does. The next occurrence answers it.
 
 **Problem.** Shape A: laptop and pc stepped +60/+71 then +84/+73 ms together
 2–4 s after a start, twice, and slewed at exactly 0.8 ms/s until patience

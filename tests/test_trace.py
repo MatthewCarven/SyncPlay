@@ -276,6 +276,7 @@ def test_steer_lines_carry_the_servo_numbers(bare, tmp_path):
         await bare._on_player_msg(n, {
             "type": "steerAck", "errMs": 1.5, "rate": 1.0002,
             "nudgeMs": 12.0, "targetCtx": 100.5, "anchorCtx": 100.2, "anchorPos": 4.7,
+            "renderAheadMs": 56.0,
         }, now())
         await bare._on_player_msg(n, {
             "type": "steerAck", "errMs": "junk", "rate": "inf",
@@ -294,6 +295,7 @@ def test_steer_lines_carry_the_servo_numbers(bare, tmp_path):
     assert 0.0 < good["sentLeadS"] < 0.35, "the target instant sits ~0.3 s ahead of its ack"
     # ...and what it was measured with, from the node's side.
     assert (good["nudgeMs"], good["targetCtx"], good["anchorCtx"], good["anchorPos"]) == (12.0, 100.5, 100.2, 4.7)
+    assert good["renderAheadMs"] == 56.0 and junk["renderAheadMs"] is None
     assert junk["errMs"] is None and junk["rate"] is None, "client data, clamped or dropped"
     assert all(junk[k] is None for k in ("nudgeMs", "targetCtx", "anchorCtx", "anchorPos"))
     assert junk["sentPosMs"] == 5000.0, "the sent target is ours, not the node's to spoil"
@@ -563,11 +565,12 @@ def steps_trace(path: Path) -> None:
     line("start", 0, build="feedface", musicDir="M", playLeadS=1.8, catchupWaitS=35.0, samples=False)
 
     def ack(name, t, err, *, run, sent_pos, sent_at, nudge=None, map_ms=1000.0,
-            anchor_ctx=None, anchor_pos=None, target=None, rate=1.0):
+            anchor_ctx=None, anchor_pos=None, target=None, rate=1.0, render=56.0):
         line("steer", t, node=f"id-{name}", name=name, track="trk", errMs=err, rate=rate,
              runS=run, offsetMs=0.0, trustMs=0.5, skewPpm=0.0, nUsed=50, lastRttMs=1.0,
              mapMs=map_ms, sentPosMs=sent_pos, sentAtNodeMs=sent_at, sentLeadS=0.3,
-             nudgeMs=nudge, targetCtx=target, anchorCtx=anchor_ctx, anchorPos=anchor_pos)
+             nudgeMs=nudge, targetCtx=target, anchorCtx=anchor_ctx, anchorPos=anchor_pos,
+             renderAheadMs=render)
 
     # nudger: the target moved because the nudge did. Anchors and map steady.
     for k, (err, nudge) in enumerate(((0.0, 0.0), (0.0, 0.0), (60.0, 60.0))):
@@ -580,11 +583,13 @@ def steps_trace(path: Path) -> None:
         ack("mapper", t, err, run=2 + 2 * k, sent_pos=2000.0 + 2000 * k, sent_at=50000.0 + 2000 * k,
             nudge=0.0, map_ms=m, target=50.0 + 2 * k - (m - 1000.0) / 1000, anchor_ctx=49.7 + 2 * k,
             anchor_pos=1.7 + 2 * k)
-    # booker: the anchors jumped 40 ms further than the target did.
+    # booker: the anchors jumped 40 ms further than the target did - and the
+    # render position ran 40 ms further ahead of the output at the same time.
     for k, (err, jump) in enumerate(((0.0, 0.0), (0.0, 0.0), (40.0, 0.04))):
         t = 10 + 2 * k
         ack("booker", t, err, run=2 + 2 * k, sent_pos=2000.0 + 2000 * k, sent_at=50000.0 + 2000 * k,
-            nudge=0.0, target=50.0 + 2 * k, anchor_ctx=49.7 + 2 * k, anchor_pos=1.7 + 2 * k + jump)
+            nudge=0.0, target=50.0 + 2 * k, anchor_ctx=49.7 + 2 * k, anchor_pos=1.7 + 2 * k + jump,
+            render=56.0 + jump * 1000)
     # ghost: an old page - only errMs and mapMs. The step lands in `rest`.
     for k, err in enumerate((0.0, 0.0, 70.0)):
         line("steer", 10 + 2 * k, node="id-ghost", name="ghost", track="trk", errMs=err, rate=1.0,
@@ -619,6 +624,8 @@ def test_steps_lay_a_jump_against_its_inputs(tmp_path):
     assert by["nudger"]["target"] == pytest.approx(0.0) and by["nudger"]["book"] == pytest.approx(0.0, abs=1e-6)
     assert by["mapper"]["map"] == pytest.approx(-50.0) and by["mapper"]["rest"] == pytest.approx(0.0, abs=1e-6)
     assert by["booker"]["book"] == pytest.approx(40.0) and by["booker"]["rest"] == pytest.approx(0.0, abs=1e-6)
+    assert by["booker"]["render"] == pytest.approx(40.0), "and render names why the anchors moved"
+    assert by["nudger"]["render"] == pytest.approx(0.0) and by["ghost"]["render"] is None
     assert by["ghost"]["target"] is None and by["ghost"]["nudge"] is None and by["ghost"]["book"] is None
     assert by["ghost"]["map"] == pytest.approx(0.0) and by["ghost"]["rest"] == pytest.approx(70.0)
     assert all(d["dErr"] == pytest.approx(d["errTo"] - d["errFrom"]) for d in by.values())

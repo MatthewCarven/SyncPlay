@@ -55,6 +55,7 @@ function build(startSrc) {
     ${fn("logLine")}
     ${fn("describeCause")}
     ${fn("mapMs")}
+    ${fn("renderAheadMs")}
     ${fn("perfToCtx")}
     ${fn("stopCurrent")}
     ${fn("posAt")}
@@ -218,12 +219,18 @@ function starts(h) { return h.sent.filter((m) => m.type === "state" && m.playing
   check("every steerAck carries nudgeMs, targetCtx and the anchors",
         acks.every((m) => ["nudgeMs", "targetCtx", "anchorCtx", "anchorPos"]
                              .every((k) => typeof m[k] === "number")));
+  check("every steerAck carries renderAheadMs",
+        acks.every((m) => typeof m.renderAheadMs === "number"));
   const m = steerAt(h, 7);
   const last = h.sent[h.sent.length - 1];
   const rebuilt = last.anchorPos + Math.max(0, last.targetCtx - last.anchorCtx) * last.rate;
   check("the ack's fields rebuild its own err: posAt(target) - posMs, via the shipped posAt",
         last.type === "steerAck" && Math.abs((rebuilt - m.posMs / 1000) * 1000 - last.errMs) < 1e-6
         && Math.abs(last.errMs - 7) < 1e-6);
+  // The stub's output timestamp is pinned at contextTime 100 while currentTime
+  // advances, so render-ahead on this ack is exactly how far the harness has come.
+  check("renderAheadMs is the render position minus the output position",
+        Math.abs(last.renderAheadMs - (h.now() - 100) * 1000) < 1e-6);
 }
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : "\nall checks passed");
