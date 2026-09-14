@@ -1,7 +1,8 @@
 # Plan — the three shapes from the 2026-09-11 capture
 
 Status: **slices 1 and 3 built 2026-09-11, slice 1b 2026-09-12; slice 4 — Shape A
-found and fixed — 2026-09-14; slice 2 not started (gated, still one mirror pair).** Three slices, three commits,
+found and fixed — 2026-09-14; slice 5 — the laptop's cold-start fault, kept warm —
+2026-09-14; slice 2 not started (gated, still one mirror pair).** Three slices, three commits,
 each a `git revert` from the last. Matthew asked for the plan first; the
 slices run afterwards, one per "continue".
 
@@ -143,6 +144,47 @@ the same line). 379 tests.
 **Audible trade-off.** None to lose: the change removes a false 0–250 ms
 "correction" of audio that was right. No constant, no rule, no cadence
 touched.
+
+## Slice 5 — Shape B on the laptop: the output stream, kept open (2026-09-14)
+
+**What the instrument said.** The laptop's first ack after every cold
+`play`/`seek` read −360…−510 ms, eight sessions in a row, then 0 after the
+fault restart — real (no mirror ever followed). With the sent columns in
+place, the map (`perfMs − ctxMs`) at each fault against the laptop's last
+node line before the play: **+490 → −510, +368 → −388, +364 → −383,
++354 → −373**. The fault *is* the map jump: the context clock stood still
+for ~400 ms across the start. And the laptop's reconnect hellos read
+`out 0.0 ms` — Chrome reporting no open output stream — where its fresh
+joins read 56.0. Never on an `auto` advance; every time on a cold start.
+
+**Mechanism.** Desktop Chrome closes the platform output stream after a
+stretch of digital silence and re-opens it on demand; a WASAPI re-open is a
+few hundred ms during which `currentTime` does not advance. The play was
+scheduled through the pre-stall map, so the source started that late
+against the room. The restart corrected it — correctly. The pc and the
+phone do not show it because their pages are never silent that long, or
+their platforms do not close the stream.
+
+**Fix.** At JOIN, a `ConstantSourceNode` at `KEEP_WARM_LEVEL = 1e-6`
+(−120 dBFS of DC) straight to `ctx.destination`: non-zero, so the stream is
+never silent and never closed; nothing at the speaker. It bypasses `master`,
+so the EQ and the spectrum tap never see it, and the servo reads position
+off `current.*`. The hello's `servo` dict carries `keepWarm`, so the join
+line and the trace say which pages have it.
+
+**Verified.** 379 tests (the servo allow-list grows the key), `node
+--check`, harness unchanged (32). Live on a throwaway with the in-app node:
+joins, `state running`, `keepWarm` set at 1e-6, the analyser on `master`
+reads a peak of exactly 0, join line `out 56.0 ms`, trace `servo.keepWarm
+1e-06`. **Not reproduced here** — the in-app browser keeps its stream open
+while idle (48 s, `outputLatency` 0.056 throughout), so the proof is
+Matthew's laptop after the reload: a reconnect join reading `out 56.0 ms`
+instead of `0.0`, and the next cold play with no laptop fault in
+`trace_report.py`'s restarts line.
+
+**Audible trade-off.** None; a DC offset 120 dB down is below any DAC's
+floor. The laptop's audio device stays open — the cost is whatever that
+draws, on a machine that is plugged in.
 
 ## Slice 2 — a fault is confirmed before it restarts
 

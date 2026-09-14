@@ -41,6 +41,7 @@ let reconnectDelay = 1000;
 let wakeLock = null;
 let analyser = null;     // taps master to feed the control-page spectrum
 let eq = null;           // per-node output EQ chain: source -> eq -> master
+let keepWarm = null;     // the inaudible signal that keeps the output stream open
 let micStream = null;    // getUserMedia stream when this device is a calibration mic
 let micAnalyser = null;
 let micTimer = null;
@@ -70,6 +71,9 @@ const REANCHOR_S = 0.2;      // beyond this, slewing is hopeless: restart in pla
 // a stuck one does not. So this waits.
 const SLEW_LIMIT_S = 2 * MAX_RATE_TRIM * STEER_HORIZON_S;  // 24 ms; 2x saturation
 const SLEW_PATIENCE_S = 10;  // still out there after this long, and slewing lost
+// The keep-warm level: non-zero, so the output stream never counts as silent
+// and is never closed; -120 dBFS of DC, so it is nothing at the speaker.
+const KEEP_WARM_LEVEL = 1e-6;
 
 // --- clock mapping: performance.now() ms -> AudioContext seconds -------------
 // getOutputTimestamp() returns a correlated pair: "context position X was/will
@@ -120,6 +124,23 @@ $("joinBtn").addEventListener("click", async () => {
   // output. Born flat (0 dB = transparent); the beep skips it. Tone only — the
   // servo reads position off current.*, entirely upstream of these filters.
   eq = buildEq();
+
+  // Keep the platform output stream open. Desktop Chrome closes it after a
+  // stretch of digital silence and re-opens it on demand, and a re-open costs
+  // a few hundred ms during which the context clock does not advance: the
+  // laptop's every cold start on 2026-09-13/14 faulted at -360..-510 ms, and
+  // each time the perf->ctx map had jumped by exactly that; its reconnect
+  // hellos read `out 0.0 ms` - no stream open. Auto-advances never faulted:
+  // never silent long enough. A DC offset 120 dB down is not silence to the
+  // stream and not a sound to anyone; straight to the destination, so master,
+  // the EQ and the spectrum tap never see it, and the servo reads position
+  // off current.*, nowhere near here. Reference: KEEP_WARM_LEVEL.
+  if (ctx.createConstantSource) {
+    keepWarm = ctx.createConstantSource();
+    keepWarm.offset.value = KEEP_WARM_LEVEL;
+    keepWarm.connect(ctx.destination);
+    keepWarm.start();
+  }
 
   joined = true;
   $("joinView").style.display = "none";
@@ -180,7 +201,7 @@ function connect() {
       outputLatencyMs: ctx && typeof ctx.outputLatency === "number" ? ctx.outputLatency * 1000 : null,
       // ...and which servo it runs, so a trace says what it was watching.
       servo: { reanchorS: REANCHOR_S, slewLimitS: SLEW_LIMIT_S, slewPatienceS: SLEW_PATIENCE_S,
-               maxRateTrim: MAX_RATE_TRIM, steerHorizonS: STEER_HORIZON_S },
+               maxRateTrim: MAX_RATE_TRIM, steerHorizonS: STEER_HORIZON_S, keepWarm: KEEP_WARM_LEVEL },
     }));
   };
 

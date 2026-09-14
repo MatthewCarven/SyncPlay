@@ -2614,3 +2614,50 @@ it is the output stream re-opening) — carried, not chased.
 **Adopting it.** A reload per node (`player.js`). The next trace's
 `anchor slips: none` and a STEPS table with no `rest`-only rows are the
 proof.
+
+## 2026-09-14 (cont.) — the laptop's cold-start fault: the stream, kept open (slice 5)
+
+**Read.** The eight laptop faults (−362, −484, −510, −401, −388, −383,
+−373, −459), each the first ack of a `play`/`seek`, laid against the
+laptop's `mapMs` on its last node line before the play: the map jumped
+**+490, +368, +364, +354** where the faults read −510, −388, −383, −373.
+Where there was no node line before (first play of a session) the
+reconnect join had read `out 0.0 ms`. The context clock stood still for
+the length of the fault; the source, scheduled through the old map,
+started that late; the fault restart put it right. Real, and the restart
+was doing its job — the discontinuity is the stall itself. `auto`
+advances never faulted: the stream never went idle between them.
+
+**Mechanism.** Desktop Chrome closes the platform output stream after a
+period of digital silence and re-opens it on demand; on Windows/WASAPI
+that costs a few hundred ms during which `currentTime` does not advance.
+`outputLatency` reads 0 while the stream is closed — which is exactly what
+the laptop's idle reconnects said.
+
+**Fix.** `KEEP_WARM_LEVEL = 1e-6`: a `ConstantSourceNode` at −120 dBFS of
+DC, straight to `ctx.destination`, started at JOIN. Non-zero, so the
+stream is never silent; nothing at the speaker; bypasses `master`, so the
+EQ and the spectrum tap never see it; the servo reads `current.*`. The
+hello's `servo` carries `keepWarm` (allow-listed on the conductor), so the
+join line and the trace say which pages have it.
+
+**Verified.** 379 tests, `node --check`, harness 32. Live on a throwaway
+:8931 with the in-app node: joins, `running`, `keepWarm.offset` 1e-6, the
+analyser on `master` reads peak 0, join `out 56.0 ms`, trace
+`servo.keepWarm 1e-06` on the reloaded page (the first hello came from a
+cached `player.js` without it — a reload is a reload). **Not reproduced
+here**: the in-app browser keeps its stream open while idle (48 s,
+`outputLatency` 0.056 throughout), so the mechanism is argued from the
+trace, not demonstrated. Matthew's laptop after the reload is the proof:
+a reconnect join reading `out 56.0 ms`, and `trace_report.py` showing no
+laptop fault on the next cold play.
+
+**Also seen in these traces.** The tablet's 17:42:46 step (−7.5 → −118.5)
+is `-map −112.1`, `book +1.0`, `rest +0.1`: cleanly its output-timestamp
+mapping moving 112 ms mid-track, then a patience restart — the tablet's
+device does that, and now it is a column, not a mystery. The phone's
+STEPS rows at 11:17:39 were a seek; the report now skips those.
+
+**Held.** Slice 2 still gated — five traces, no mirror pair. Two reloads
+owed the fleet now (slices 4 and 5, both `player.js`); one reload takes
+both.

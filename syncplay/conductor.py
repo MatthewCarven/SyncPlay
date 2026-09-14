@@ -150,7 +150,7 @@ TRACE_PERIOD_S = 10
 START_CAUSES = ("play", "resume", "seek", "next", "auto", "catchup", "reanchor")
 RESTART_REASONS = ("fault", "patience")
 CTX_STATES = ("running", "suspended", "interrupted", "closed")
-SERVO_KEYS = ("reanchorS", "slewLimitS", "slewPatienceS", "maxRateTrim", "steerHorizonS")
+SERVO_KEYS = ("reanchorS", "slewLimitS", "slewPatienceS", "maxRateTrim", "steerHorizonS", "keepWarm")
 
 
 def now() -> float:

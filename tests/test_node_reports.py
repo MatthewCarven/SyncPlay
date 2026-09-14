@@ -108,13 +108,13 @@ def test_a_hello_with_device_facts_reaches_stats_and_the_join_event(tmp_path, mo
                 "type": "hello", "clientId": "n1", "name": "tablet",
                 "sampleRate": 48000, "baseLatencyMs": 5.3, "outputLatencyMs": 21.3,
                 "servo": {"reanchorS": 0.2, "slewLimitS": 0.024, "slewPatienceS": 10,
-                          "maxRateTrim": 8e-4, "steerHorizonS": 15, "junk": "x"},
+                          "maxRateTrim": 8e-4, "steerHorizonS": 15, "keepWarm": 1e-6, "junk": "x"},
             })
             await asyncio.sleep(0.2)
             n = cond.nodes["n1"]
             assert (n.sample_rate, n.base_latency_ms, n.output_latency_ms) == (48000.0, 5.3, 21.3)
             assert n.servo == {"reanchorS": 0.2, "slewLimitS": 0.024, "slewPatienceS": 10.0,
-                               "maxRateTrim": 8e-4, "steerHorizonS": 15.0}
+                               "maxRateTrim": 8e-4, "steerHorizonS": 15.0, "keepWarm": 1e-6}
             s = n.stats(None)
             assert s["sampleRate"] == 48000.0 and s["outputLatencyMs"] == 21.3
             assert s["servo"]["reanchorS"] == 0.2

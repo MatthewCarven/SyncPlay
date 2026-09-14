@@ -211,6 +211,13 @@ the player audio path only when unavoidable, one commit per feature so
     traces, all at runS 1.6–1.7 s. Anchor at `max(nowCtx, startedCtx)`;
     harness old-vs-new 0/+200 → 0/0; `anchor slips` line in the report is the
     detector. Needs a reload.
+  - [x] slice 5 (2026-09-14): **the laptop's cold-start fault** — at every one
+    the perf→ctx map jumped by the fault amount (+490 → −510, +368 → −388 …):
+    Chrome closed the idle output stream and re-opened it ~400 ms late. A
+    `ConstantSourceNode` at 1e-6 to the destination from JOIN keeps it open;
+    `servo.keepWarm` on the hello says which pages have it. Proof is the
+    laptop after the reload: `out 56.0 ms` on a reconnect join, no fault on
+    the next cold play. Needs a reload.
   - Fault confirm-on-next-ack in `onSteer`: the phone's -749 -> +750 mirror
     pair (one false sample, two restarts). Evidence-gated: wait for a second
     mirror pair before touching the servo.
