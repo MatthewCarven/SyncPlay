@@ -34,7 +34,7 @@ const OLD_START = `function startSource(buf, trackId, title, whenCtx, seekS) {
   send({ type: "state", playing: trackId });
 }`;
 
-function build(startSrc) {
+function build(startSrc, steerSrc = fn("onSteer")) {
   return new Function(`
     let current = null, nudgeMs = 0;
     const sent = [];
@@ -60,11 +60,13 @@ function build(startSrc) {
     ${fn("stopCurrent")}
     ${fn("posAt")}
     ${startSrc}
-    ${fn("onSteer")}
+    ${steerSrc}
     return {
-      seed(buf, id, anchorPos = 0) {
+      // startCtx: when the source is scheduled to start - the anchors sit
+      // there until the first steer moves them, exactly as startSource leaves them.
+      seed(buf, id, anchorPos = 0, startCtx = 0) {
         current = { src: ctx.createBufferSource(), trackId: id, title: "t",
-                    rate: 1, anchorCtx: 0, anchorPos, startedCtx: 0, slewSince: null };
+                    rate: 1, anchorCtx: startCtx, anchorPos, startedCtx: startCtx, slewSince: null };
         cache.set(id, buf);
       },
       steer: (m) => onSteer(m),
@@ -223,7 +225,7 @@ function starts(h) { return h.sent.filter((m) => m.type === "state" && m.playing
         acks.every((m) => typeof m.renderAheadMs === "number"));
   const m = steerAt(h, 7);
   const last = h.sent[h.sent.length - 1];
-  const rebuilt = last.anchorPos + Math.max(0, last.targetCtx - last.anchorCtx) * last.rate;
+  const rebuilt = last.anchorPos + (last.targetCtx - last.anchorCtx) * last.rate;
   check("the ack's fields rebuild its own err: posAt(target) - posMs, via the shipped posAt",
         last.type === "steerAck" && Math.abs((rebuilt - m.posMs / 1000) * 1000 - last.errMs) < 1e-6
         && Math.abs(last.errMs - 7) < 1e-6);
@@ -231,6 +233,70 @@ function starts(h) { return h.sent.filter((m) => m.type === "state" && m.playing
   // advances, so render-ahead on this ack is exactly how far the harness has come.
   check("renderAheadMs is the render position minus the output position",
         Math.abs(last.renderAheadMs - (h.now() - 100) * 1000) < 1e-6);
+}
+
+// --- the pre-start anchor ---------------------------------------------------
+// A steer whose target is past the scheduled start, arriving while now is not.
+// The old branch re-anchored at now: posAt(now) clamps to seekS, so the anchor
+// then said "seekS at now" for a source that starts later - bookkeeping ahead
+// of the audio by the remaining lead, for the rest of the source. Observed
+// live (START_SHAPES_PLAN, Shape A): laptop and pc, 45-130 ms, then patience.
+//
+// The old branch is the shipped text with its two anchor lines put back, and
+// the splice has to match: if the shipped function drifts, this fails loudly.
+const NEW_ANCHOR = `    const at = Math.max(nowCtx, current.startedCtx);
+    current.anchorPos = posAt(at);
+    current.anchorCtx = at;`;
+const OLD_ANCHOR = `    current.anchorPos = posAt(nowCtx); // re-anchor bookkeeping at the old rate
+    current.anchorCtx = nowCtx;`;
+const SHIPPED_STEER = fn("onSteer").replace(/\r\n/g, "\n");  // template literals are LF; the file is CRLF
+if (!SHIPPED_STEER.includes(NEW_ANCHOR)) { console.error("FAIL: onSteer no longer carries the guarded anchor"); process.exit(1); }
+const OLD_STEER = SHIPPED_STEER.replace(NEW_ANCHOR, OLD_ANCHOR);
+
+// The conductor's truth for a source at `seekS` scheduled at `startCtx`: the
+// song is at seekS + (target - startCtx). Built from the truth, not from the
+// node's posAt, so the ack's err is the bookkeeping's error and nothing else.
+function steerTruth(h, seekS, startCtx, lead) {
+  const target = h.now() + lead;
+  const atNodeMs = 100000 + (target - 100) * 1000;
+  h.steer({ trackId: "trk", posMs: (seekS + (target - startCtx)) * 1000, atNodeMs });
+  const acks = h.sent.filter((m) => m.type === "steerAck");
+  return acks[acks.length - 1].errMs;
+}
+
+function preStart(steerSrc) {
+  const h = build(fn("startSource"), steerSrc);
+  const start = h.now() + 0.2;                 // scheduled 200 ms from now
+  h.seed({ duration: 600.0 }, "trk", 100.0, start);
+  const first = steerTruth(h, 100.0, start, 0.3);   // target past the start, now before it
+  const anchorCtx = h.current.anchorCtx;
+  h.advance(2.0);                              // well into the source
+  const second = steerTruth(h, 100.0, start, 0.3);
+  return { first, second, anchorCtx, start };
+}
+
+const old = preStart(OLD_STEER);
+const nu = preStart(SHIPPED_STEER);
+console.log("");
+console.log(`--- pre-start anchor: old first ${old.first.toFixed(1)} ms, second ${old.second.toFixed(1)} ms; shipped first ${nu.first.toFixed(1)} ms, second ${nu.second.toFixed(1)} ms`);
+check("old: the pre-start steer itself reads 0 (the reading is right, the anchor it leaves is not)",
+      Math.abs(old.first) < 1e-6);
+check("old: the anchor is moved to before the start", old.anchorCtx < old.start);
+check("old: the next steer then reads the remaining lead as being ahead (+200 ms)",
+      Math.abs(old.second - 200) < 1e-6);
+check("shipped: the pre-start steer reads 0", Math.abs(nu.first) < 1e-6);
+check("shipped: the anchor stays at the start", Math.abs(nu.anchorCtx - nu.start) < 1e-9);
+check("shipped: the next steer reads 0", Math.abs(nu.second) < 1e-6);
+{
+  // And after the start, both anchor identically: a steer at runS 2 s and one
+  // at runS 4 s read 0 on either text - the guard is a no-op once running.
+  const a = build(fn("startSource"), OLD_STEER), b = build(fn("startSource"), SHIPPED_STEER);
+  for (const h of [a, b]) { h.seed({ duration: 600.0 }, "trk", 100.0, h.now() - 2.0); }
+  const ea = [steerTruth(a, 100.0, a.now() - 2.0, 0.3)], eb = [steerTruth(b, 100.0, b.now() - 2.0, 0.3)];
+  a.advance(2); b.advance(2);
+  ea.push(steerTruth(a, 100.0, a.now() - 4.0, 0.3)); eb.push(steerTruth(b, 100.0, b.now() - 4.0, 0.3));
+  check("once running, old and shipped anchor identically (both read 0, 0)",
+        ea.every((e) => Math.abs(e) < 1e-6) && eb.every((e) => Math.abs(e) < 1e-6));
 }
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : "\nall checks passed");

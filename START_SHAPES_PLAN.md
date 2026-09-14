@@ -1,7 +1,7 @@
 # Plan — the three shapes from the 2026-09-11 capture
 
-Status: **slices 1 and 3 built 2026-09-11, slice 1b (`renderAheadMs`) 2026-09-12;
-slice 2 not started (gated).** Three slices, three commits,
+Status: **slices 1 and 3 built 2026-09-11, slice 1b 2026-09-12; slice 4 — Shape A
+found and fixed — 2026-09-14; slice 2 not started (gated, still one mirror pair).** Three slices, three commits,
 each a `git revert` from the last. Matthew asked for the plan first; the
 slices run afterwards, one per "continue".
 
@@ -97,6 +97,52 @@ the shipped function; do not reimplement `posAt`). `node --check`.
 conductor columns and `-` for the rest.
 
 **Audible trade-off.** None. Reporting only.
+
+## Slice 4 — Shape A: the pre-start re-anchor (found 2026-09-14, fixed)
+
+**What the instrument said.** Five traces from 13–14 September, 5084 acks
+with the slice-1 fields. STEPS put Shape A on the pc twice with every
+column present: `target 0, nudge 0, -map ~0, book ~0, render ~0`, the
+whole step in `rest`. So the *delta* columns could not see it — and
+rebuilding each ack's err from its own fields found why: exactly six acks
+(three laptop+pc pairs, every one at `runS` 1.6–1.7 s, inside the 1.8 s
+play lead) *reported* ~0 while their post-steer anchors said +30…+146. The
+step lands on the *next* ack, so no delta names it.
+
+**Mechanism.** `onSteer`'s non-restart branch re-anchored at `nowCtx`:
+`anchorPos = posAt(nowCtx); anchorCtx = nowCtx`. Before the start,
+`anchorCtx` is the scheduled `whenCtx` and `posAt` clamps to `seekS`, so
+the anchor moves to `(nowCtx, seekS)` — the song "already at seekS" before
+it starts — and the bookkeeping runs `whenCtx − nowCtx` ahead of the audio
+for the rest of the source. The target guard (`targetCtx > startedCtx +
+0.05`) does not cover it: the target sits 0.3 s ahead of now, so any steer
+landing in the last ~250 ms of the lead passes the guard while now is still
+before the start. Every Shape A magnitude ever seen (45, 60, 71, 73, 84,
+106, 124, 130, 146) is within that window; two nodes at once is one steer
+loop and one `t_start`. The servo then slewed *good* audio to match the
+wrong bookkeeping and patience restarted it: the discontinuity was the
+fix's doing, not the device's.
+
+**Fix.** One line: anchor at `Math.max(nowCtx, current.startedCtx)`. Before
+the start that is `(startedCtx, seekS)`, which is what `startSource` left;
+after it, identical to before. `player.js` only — a reload.
+
+**Verified.** `tools/reanchor_harness.js` old-vs-new on the shipped
+`onSteer` (the old text is the shipped text with its two anchor lines put
+back; the splice must match or the harness fails): a source scheduled
+200 ms out, a steer with target 300 ms out — old reads 0 then **+200**,
+shipped reads 0 then 0; once running, both anchor identically — 32 checks.
+`trace_report.py` gains an **anchor slips** line (an ack whose own anchors
+disagree with the err it reported, restarts' own acks excluded) — the
+detector for this exact bug; it reads the six live cases and should read
+`none` on every trace after the reload. STEPS also now skips a seek's
+new-source pair and rebuilds `book` unclamped (the clamp only means
+something before the start; a late-arriving steer extrapolates back along
+the same line). 379 tests.
+
+**Audible trade-off.** None to lose: the change removes a false 0–250 ms
+"correction" of audio that was right. No constant, no rule, no cadence
+touched.
 
 ## Slice 2 — a fault is confirmed before it restarts
 

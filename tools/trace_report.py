@@ -200,12 +200,15 @@ def _num(v) -> Optional[float]:
 def _pos_at_target_ms(r: dict) -> Optional[float]:
     """The node's own posAt(targetCtx), in ms, from the fields it sent on the
     ack — the same line through the same anchors, so it reproduces the err the
-    node computed (to within the rate trim over the ~0.3 s target lead)."""
+    node computed (to within the rate trim over the ~0.3 s target lead).
+    Unclamped on purpose: posAt's max(0, ...) only means something before the
+    start, and the ack's anchors are post-steer, so a steer that arrived late
+    (target already behind now) extrapolates back along the same line."""
     ap, ac, tc = _num(r.get("anchorPos")), _num(r.get("anchorCtx")), _num(r.get("targetCtx"))
     rate = _num(r.get("rate"))
     if ap is None or ac is None or tc is None:
         return None
-    return (ap + max(0.0, tc - ac) * (rate if rate is not None else 1.0)) * 1000.0
+    return (ap + (tc - ac) * (rate if rate is not None else 1.0)) * 1000.0
 
 
 def steps(rows: List[dict], thresh_ms: float = STEP_MS) -> List[dict]:
@@ -240,6 +243,19 @@ def steps(rows: List[dict], thresh_ms: float = STEP_MS) -> List[dict]:
         t = _num(r.get("t"))
         return t is not None and any(0.0 <= t - t0 <= 0.25 for t0 in restarted.get(key, ()))
 
+    # A seek or a catch-up is a new source under the same track id, and its
+    # `start` event lands well before the next ack (a restart's lands a hair
+    # before its own ack, which `fired` already handles).
+    started: Dict[str, List[float]] = defaultdict(list)
+    for ev in events(rows, "start"):
+        t = _num(ev.get("t"))
+        if t is not None:
+            started[str(ev.get("node"))].append(t)
+
+    def new_source_between(key: str, p: dict, r: dict) -> bool:
+        a, b = _num(p.get("t")), _num(r.get("t"))
+        return a is not None and b is not None and any(a < t0 <= b - 0.05 for t0 in started.get(key, ()))
+
     prev: Dict[str, dict] = {}
     out: List[dict] = []
     for r in rows:
@@ -248,7 +264,7 @@ def steps(rows: List[dict], thresh_ms: float = STEP_MS) -> List[dict]:
         key = str(r.get("node") or r.get("name"))
         p = prev.get(key)
         prev[key] = r
-        if p is None or p.get("track") != r.get("track") or fired(key, p):
+        if p is None or p.get("track") != r.get("track") or fired(key, p) or new_source_between(key, p, r):
             continue
         run_p, run_r, e_p, e_r = _num(p.get("runS")), _num(r.get("runS")), _num(p.get("errMs")), _num(r.get("errMs"))
         if None in (run_p, run_r, e_p, e_r) or run_r <= run_p:
@@ -275,6 +291,41 @@ def steps(rows: List[dict], thresh_ms: float = STEP_MS) -> List[dict]:
             "target": target, "nudge": nudge, "map": None if map_ is None else -map_,
             "book": book, "rest": rest, "render": delta("renderAheadMs"),
         })
+    return out
+
+
+SLIP_MS = 5.0  # an ack whose own anchors disagree with the err it reported by more
+
+
+def anchor_slips(rows: List[dict]) -> List[dict]:
+    """Acks whose reported err is not what their own post-steer anchors say.
+
+    The reported err was computed on the anchors *before* the steer moved
+    them; the ack carries the anchors *after*. On the same line they agree.
+    They disagree only when the steer moved the anchor off the line - the
+    pre-start re-anchor (the anchor moved to before the source's own start,
+    START_SHAPES_PLAN slice 4) - and the disagreement is exactly how far the
+    bookkeeping will run ahead from then on. The restart branch replaces the
+    anchors wholesale, so its own ack is skipped."""
+    out: List[dict] = []
+    restarted: Dict[str, List[float]] = defaultdict(list)
+    for ev in events(rows, "restart"):
+        t = _num(ev.get("t"))
+        if t is not None:
+            restarted[str(ev.get("node"))].append(t)
+    for r in rows:
+        if r.get("kind") != "steer":
+            continue
+        pos, sent, err, t = _pos_at_target_ms(r), _num(r.get("sentPosMs")), _num(r.get("errMs")), _num(r.get("t"))
+        if pos is None or sent is None or err is None or t is None:
+            continue
+        key = str(r.get("node"))
+        if any(0.0 <= t - t0 <= 0.25 for t0 in restarted.get(key, ())):
+            continue
+        slip = (pos - sent) - err
+        if abs(slip) > SLIP_MS:
+            out.append({"wall": _short_wall(r), "name": str(r.get("name") or key),
+                        "runS": _num(r.get("runS")), "errMs": err, "slipMs": slip})
     return out
 
 
@@ -469,6 +520,13 @@ def report(rows: List[dict], source: str = "") -> str:
             )
         out.append("  (a column carrying the step is the input that moved; `rest` is what this trace's columns cannot see;")
         out.append("   `render` is outside the sum - a `book` that matches it is the device's buffer moving under the anchors)")
+    slips = anchor_slips(rows)
+    if slips:
+        out.append(f"  anchor slips ({len(slips)}) - the ack read one thing, its anchors say another; the bookkeeping runs this far ahead from here:")
+        for d in slips:
+            out.append(f"    {d['wall']}  {d['name']:<20} runS {_f(d['runS'], '.1f'):>5}  read {d['errMs']:+.1f}, anchors say {d['errMs'] + d['slipMs']:+.1f}  (slip {d['slipMs']:+.1f} ms)")
+    else:
+        out.append("  anchor slips: none")
     out.append("")
 
     # --- mesh

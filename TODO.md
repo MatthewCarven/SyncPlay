@@ -204,6 +204,13 @@ the player audio path only when unavoidable, one commit per feature so
     `render` column in STEPS beside `book`. The Shape A hypothesis, as one
     number: a Windows shared-mode buffer change moves it by exactly the step.
     Rides the same reload.
+  - [x] slice 4 (2026-09-14): **Shape A found and fixed** — `onSteer` re-anchored
+    at `nowCtx` before the source's own start, `posAt` clamped to `seekS`, and
+    the bookkeeping ran the remaining lead ahead of the audio; the servo then
+    slewed good audio and patience restarted it. Six live acks across five
+    traces, all at runS 1.6–1.7 s. Anchor at `max(nowCtx, startedCtx)`;
+    harness old-vs-new 0/+200 → 0/0; `anchor slips` line in the report is the
+    detector. Needs a reload.
   - Fault confirm-on-next-ack in `onSteer`: the phone's -749 -> +750 mirror
     pair (one false sample, two restarts). Evidence-gated: wait for a second
     mirror pair before touching the servo.

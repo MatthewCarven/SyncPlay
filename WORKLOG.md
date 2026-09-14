@@ -2554,3 +2554,63 @@ in the console — `baseLatency` 20.3 + `outputLatency` 56.0 — and on the
 trace 27 acks read mean 71.0 ms, sd 3.7, min 52.5, max 72.5 - it moves, a 20 ms dip on one ack of a hidden in-app tab, which is precisely why it earns a column.
 
 **Adopting it.** Same reload as slice 1's ack half; nothing extra owed.
+
+## 2026-09-14 — Shape A found: the pre-start re-anchor (slice 4)
+
+**The traces.** Matthew restarted :8927 several times on the 13th and 14th
+on the working tree, so five traces carry the slice-1 fields — 5084 acks.
+Read first thing: no mirror pairs anywhere (slice 2 stays gated); the
+laptop's cold-start fault is now eight-for-eight (−362 … −510, always the
+first ack of a `play`/`seek`, then 0 — real, and the restart is doing its
+job); and Shape A on the pc twice with every column present — `target 0,
+nudge 0, -map ~0, book ~0, render ~0`, the whole step in `rest`.
+
+**The find.** A step no delta column can see is a step that happened
+*between* an ack's reading and its anchors. Rebuilding every ack's err
+from its own fields — `anchorPos + (targetCtx − anchorCtx)·rate − sentPos`
+— against what it reported: 5084 acks, and exactly six disagree, all at
+`runS` 1.6–1.7 s, three laptop+pc pairs (00:53:18 +146/+144, 17:38:13
++130/+124, 19:55:01 +30/+45), each followed by the step on the next ack and
+a patience restart 12 s later. The first pass flagged dozens more on the
+phone; those were my rebuild's clamp on late-arriving steers, not the
+node's — removed, and the six remained.
+
+**The mechanism** is in `onSteer`'s non-restart branch: `anchorPos =
+posAt(nowCtx); anchorCtx = nowCtx`. Before the scheduled start `anchorCtx`
+is `whenCtx` and `posAt` clamps to `seekS`, so the anchor moves to
+`(nowCtx, seekS)` — the song "already at seekS" before it starts — and the
+bookkeeping runs `whenCtx − nowCtx` ahead of the audio for the rest of the
+source. The guard `targetCtx > startedCtx + 0.05` does not cover it, because
+the target sits 0.3 s ahead of now: a steer landing in the last ~250 ms of
+the 1.8 s lead passes it while now is still before the start. Every Shape A
+magnitude ever seen is inside 0–250 ms; two nodes at once is one steer loop
+and one `t_start`; the phone missed it at 10:50 on the 11th because its
+steer arrived later. The servo then slewed *good* audio at 0.8 ms/s to
+match the wrong bookkeeping and patience restarted it at 10 s — the
+discontinuity Matthew heard was the servo's doing.
+
+**The fix** is one line: anchor at `Math.max(nowCtx, current.startedCtx)`.
+Before the start that is `(startedCtx, seekS)`, exactly what `startSource`
+left; after it, unchanged. `setValueAtTime(rate, nowCtx)` stays — a rate
+scheduled before the start applies from the start.
+
+**Verified.** `reanchor_harness.js`: the old text is the shipped `onSteer`
+with its two anchor lines put back (the splice must match, so a drifted
+function fails loudly; template literals are LF and the file is CRLF, which
+cost one run). A source scheduled 200 ms out, a steer whose target is
+300 ms out built from the *conductor's* truth rather than the node's posAt:
+old reads 0 then **+200**, shipped reads 0 then 0, and once running both
+anchor identically — 32 checks. `node --check`. `trace_report.py`: an
+**anchor slips** line (ack reported vs its own anchors, restarts' own acks
+excluded) reads the six live cases and is the detector for the reload;
+STEPS skips a seek's new-source pair (the 11:17:39 `target +87506` rows
+were a seek) and rebuilds unclamped. Planted tests for both; 379 pass.
+
+**Not touched.** `REANCHOR_S`, `SLEW_PATIENCE_S`, the fault rule, the
+cadence. Slice 2 stays gated. The laptop's −400 ms cold start is real and
+separate (its audio genuinely starts late; the map column will say whether
+it is the output stream re-opening) — carried, not chased.
+
+**Adopting it.** A reload per node (`player.js`). The next trace's
+`anchor slips: none` and a STEPS table with no `rest`-only rows are the
+proof.

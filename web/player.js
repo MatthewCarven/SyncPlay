@@ -648,8 +648,18 @@ function onSteer(msg) {
     });
   } else {
     const nowCtx = ctx.currentTime;
-    current.anchorPos = posAt(nowCtx); // re-anchor bookkeeping at the old rate
-    current.anchorCtx = nowCtx;
+    // Re-anchor bookkeeping at the old rate - but never before the source's
+    // own start. posAt() clamps to seekS there, so an anchor moved to a
+    // pre-start nowCtx claims the song is already at seekS, and from then on
+    // the bookkeeping runs (startedCtx - nowCtx) ahead of the audio. The
+    // target guard above does not cover it: the target sits 0.3 s ahead of
+    // now, so a steer landing in the last ~250 ms of the play lead passes it
+    // while now is still before the start. Seen live 2026-09-13 (Shape A in
+    // START_SHAPES_PLAN): laptop and pc 45-130 ms "ahead" on the ack after
+    // a start, the servo slewing good audio to match, patience restarting it.
+    const at = Math.max(nowCtx, current.startedCtx);
+    current.anchorPos = posAt(at);
+    current.anchorCtx = at;
     current.rate = 1 - Math.max(-MAX_RATE_TRIM,
                                 Math.min(MAX_RATE_TRIM, errS / STEER_HORIZON_S));
     current.src.playbackRate.setValueAtTime(current.rate, nowCtx);

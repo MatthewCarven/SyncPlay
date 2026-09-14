@@ -594,6 +594,14 @@ def steps_trace(path: Path) -> None:
     for k, err in enumerate((0.0, 0.0, 70.0)):
         line("steer", 10 + 2 * k, node="id-ghost", name="ghost", track="trk", errMs=err, rate=1.0,
              runS=2 + 2 * k, offsetMs=0.0, trustMs=0.5, skewPpm=0.0, nUsed=50, lastRttMs=1.0, mapMs=1000.0)
+    # slipper: the pre-start re-anchor. The ack read 0 on the old anchors and
+    # carries new ones that say +120 - the bookkeeping runs 120 ms ahead from here.
+    ack("slipper", 10, 0.0, run=1.6, sent_pos=100000.0, sent_at=50000.0, nudge=0.0,
+        target=50.0, anchor_ctx=49.7, anchor_pos=100.0 - 0.3 + 0.12)
+    # seeker: a seek between two acks is a new source, not a step.
+    line("steer", 10, node="id-seeker", name="seeker", track="trk", errMs=0.0, rate=1.0, runS=50, mapMs=1000.0)
+    line("event", 11, event="start", level="info", node="id-seeker", name="seeker", text="source started (seek)")
+    line("steer", 12, node="id-seeker", name="seeker", track="trk", errMs=90.0, rate=1.0, runS=52, mapMs=1000.0)
     # faulter: a real fault, one restart, corrected - not a step, not a mirror.
     line("steer", 10, node="id-faulter", name="faulter", track="trk", errMs=0.0, rate=1.0, runS=2, mapMs=1000.0)
     line("event", 12, event="restart", level="warning", node="id-faulter", name="faulter",
@@ -619,7 +627,7 @@ def test_steps_lay_a_jump_against_its_inputs(tmp_path):
     steps_trace(p)
     rows = R.load(p)
     by = {d["name"]: d for d in R.steps(rows)}
-    assert set(by) == {"nudger", "mapper", "booker", "ghost"}, "restart pairs are corrections, not steps"
+    assert set(by) == {"nudger", "mapper", "booker", "ghost"}, "restart pairs are corrections and a seek is a new source, not steps"
     assert by["nudger"]["nudge"] == pytest.approx(60.0) and by["nudger"]["rest"] == pytest.approx(0.0, abs=1e-6)
     assert by["nudger"]["target"] == pytest.approx(0.0) and by["nudger"]["book"] == pytest.approx(0.0, abs=1e-6)
     assert by["mapper"]["map"] == pytest.approx(-50.0) and by["mapper"]["rest"] == pytest.approx(0.0, abs=1e-6)
@@ -629,6 +637,19 @@ def test_steps_lay_a_jump_against_its_inputs(tmp_path):
     assert by["ghost"]["target"] is None and by["ghost"]["nudge"] is None and by["ghost"]["book"] is None
     assert by["ghost"]["map"] == pytest.approx(0.0) and by["ghost"]["rest"] == pytest.approx(70.0)
     assert all(d["dErr"] == pytest.approx(d["errTo"] - d["errFrom"]) for d in by.values())
+
+
+def test_an_anchor_slip_is_the_ack_disagreeing_with_its_own_anchors(tmp_path):
+    p = tmp_path / "t.jsonl"
+    steps_trace(p)
+    rows = R.load(p)
+    (s,) = R.anchor_slips(rows)
+    assert s["name"] == "slipper" and s["runS"] == 1.6 and s["errMs"] == 0.0
+    assert s["slipMs"] == pytest.approx(120.0)
+    text = R.report(rows)
+    assert "anchor slips (1)" in text and "slipper" in text and "(slip +120.0 ms)" in text
+    block = text[text.index("anchor slips"):text.index("MESH closure")]
+    assert "faulter" not in block and "mirror" not in block, "a restart's own ack replaces its anchors; not a slip"
 
 
 def test_mirror_pairs_are_counted_and_a_plain_fault_is_not(tmp_path):
@@ -651,3 +672,4 @@ def test_a_trace_without_restarts_or_steps_says_so(tmp_path):
     text = R.report(R.load(p))
     assert "mirror pairs: none" in text
     assert "STEPS in err > 30 ms between consecutive acks on one source (0)" in text
+    assert "anchor slips: none" in text
